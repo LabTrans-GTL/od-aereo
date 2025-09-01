@@ -802,7 +802,6 @@ opcoes_origem_todas, search_map_origem = create_searchable_options({k: v for k, 
 st.markdown(f"""
 <div class="main-header">
     <h1>Sistema de Análise de Rotas Aéreas</h1>
-    <p>Bem-vindo, {st.session_state.username}!</p>
 </div>
 """, unsafe_allow_html=True)
 
