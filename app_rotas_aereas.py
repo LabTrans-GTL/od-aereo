@@ -14,6 +14,8 @@ import os
 import hashlib
 import requests
 import io
+import gdown
+import shutil
 from pathlib import Path
 
 # Funções de autenticação
@@ -133,136 +135,115 @@ def logout():
     st.rerun()
 
 # Funções para download de dados do Google Drive
-def get_google_drive_file_id(url):
-    """Extrai o ID do arquivo do Google Drive a partir da URL"""
-    if 'drive.google.com' in url:
-        # Para URLs do tipo: https://drive.google.com/file/d/FILE_ID/view
-        if '/file/d/' in url:
-            return url.split('/file/d/')[1].split('/')[0]
-        # Para URLs do tipo: https://drive.google.com/open?id=FILE_ID
-        elif 'id=' in url:
-            return url.split('id=')[1].split('&')[0]
-    return None
-
-def download_file_from_google_drive(file_id, filename, destination_folder="Dados"):
-    """Baixa um arquivo do Google Drive usando o ID do arquivo"""
-    try:
-        # URL para download direto do Google Drive
-        download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-        
-        # Criar diretórios se não existirem
-        os.makedirs(f"{destination_folder}/raw", exist_ok=True)
-        os.makedirs(f"{destination_folder}/interim", exist_ok=True)
-        
-        # Determinar o caminho de destino baseado na extensão do arquivo
-        if filename.endswith('.csv'):
-            file_path = f"{destination_folder}/raw/{filename}"
-        elif filename.endswith('.parquet'):
-            file_path = f"{destination_folder}/interim/{filename}"
-        else:
-            file_path = f"{destination_folder}/raw/{filename}"
-        
-        # Baixar o arquivo
-        response = requests.get(download_url, stream=True)
-        response.raise_for_status()
-        
-        # Salvar o arquivo
-        with open(file_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        return file_path
-        
-    except Exception as e:
-        return None
-
-def get_google_drive_folder_files(folder_url):
-    """Obtém lista de arquivos de uma pasta do Google Drive (requer API key)"""
-    # Para simplificar, vamos usar uma abordagem diferente
-    # O usuário pode fornecer os IDs dos arquivos diretamente
-    return None
 
 def download_data_files():
-    """Baixa todos os arquivos de dados necessários"""
+    """Baixa todos os arquivos de dados necessários do Google Drive"""
     try:
-        # Tentar obter configurações dos secrets do Streamlit primeiro
+        # Tentar obter URL da pasta do Google Drive dos secrets
         if hasattr(st, 'secrets'):
-            # Acessar diretamente (sem seção [secrets])
             drive_folder_url = st.secrets.get('GOOGLE_DRIVE_FOLDER_URL')
-            file_mapping = {
-                'mun_UTPs.csv': st.secrets.get('FILE_ID_MUN_UTPS'),
-                'aeroportos.parquet': st.secrets.get('FILE_ID_AEROPORTOS'),
-                'classificacao_pares.parquet': st.secrets.get('FILE_ID_CLASSIFICACAO'),
-                'comerciais.parquet': st.secrets.get('FILE_ID_COMERCIAL'),
-                'executivos.parquet': st.secrets.get('FILE_ID_EXECUTIVO')
-            }
         else:
             # Fallback para variáveis de ambiente
             drive_folder_url = os.getenv('GOOGLE_DRIVE_FOLDER_URL')
-            file_mapping = {
-                'mun_UTPs.csv': os.getenv('FILE_ID_MUN_UTPS'),
-                'aeroportos.parquet': os.getenv('FILE_ID_AEROPORTOS'),
-                'classificacao_pares.parquet': os.getenv('FILE_ID_CLASSIFICACAO'),
-                'comerciais.parquet': os.getenv('FILE_ID_COMERCIAL'),
-                'executivos.parquet': os.getenv('FILE_ID_EXECUTIVO')
-            }
     except:
         # Fallback para variáveis de ambiente se secrets não funcionar
         drive_folder_url = os.getenv('GOOGLE_DRIVE_FOLDER_URL')
-        file_mapping = {
-            'mun_UTPs.csv': os.getenv('FILE_ID_MUN_UTPS'),
-            'aeroportos.parquet': os.getenv('FILE_ID_AEROPORTOS'),
-            'classificacao_pares.parquet': os.getenv('FILE_ID_CLASSIFICACAO'),
-            'comerciais.parquet': os.getenv('FILE_ID_COMERCIAL'),
-            'executivos.parquet': os.getenv('FILE_ID_EXECUTIVO')
-        }
     
-    # Verificar quais arquivos estão faltando
-    required_files = [
-        "Dados/raw/mun_UTPs.csv",
-        "Dados/interim/aeroportos.parquet",
-        "Dados/interim/classificacao_pares.parquet",
-        "Dados/interim/comerciais.parquet",
-        "Dados/interim/executivos.parquet"
+    if not drive_folder_url:
+        st.error("❌ URL da pasta do Google Drive não configurada. Configure GOOGLE_DRIVE_FOLDER_URL nos secrets.")
+        return False
+    
+    # Verificar se os dados já foram baixados
+    required_paths = [
+        "Dados/Entrada",
+        "Dados/Resultados"
     ]
     
-    missing_files = []
-    for file_path in required_files:
-        if not os.path.exists(file_path):
-            missing_files.append(file_path)
+    # Se as pastas principais existem e não estão vazias, não precisa baixar novamente
+    all_exist = True
+    for path in required_paths:
+        if not os.path.exists(path) or not os.listdir(path):
+            all_exist = False
+            break
     
-    if not missing_files:
+    if all_exist:
         return True
-
     
-    # Baixar arquivos faltantes
-    with st.spinner("Baixando dados do Google Drive..."):
-        for file_path in missing_files:
-            filename = os.path.basename(file_path)
-            if filename in file_mapping:
-                file_id = file_mapping[filename]
-                if not download_file_from_google_drive(file_id, filename):
-                    st.error(f"❌ Falha ao baixar {filename}")
-                    return False
+    # Extrair ID da pasta do Google Drive
+    try:
+        if 'folders/' in drive_folder_url:
+            folder_id = drive_folder_url.split('folders/')[1].split('?')[0]
+        elif 'id=' in drive_folder_url:
+            folder_id = drive_folder_url.split('id=')[1].split('&')[0]
+        else:
+            st.error("❌ Formato de URL do Google Drive inválido")
+            return False
+    except Exception as e:
+        st.error(f"❌ Erro ao extrair ID da pasta: {str(e)}")
+        return False
     
-    return True
+    # Baixar a pasta inteira do Google Drive
+    with st.spinner("\n\nBaixando dados do Google Drive... Isso pode levar alguns minutos."):
+        try:
+            # Criar diretório temporário para download
+            temp_dir = "temp_download"
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            
+            # Baixar pasta usando gdown
+            gdown.download_folder(
+                f"https://drive.google.com/drive/folders/{folder_id}",
+                output=temp_dir,
+                quiet=False,
+                use_cookies=False
+            )
+            
+            # Mover conteúdo para o diretório Dados
+            if os.path.exists(temp_dir):
+                # Criar diretório Dados se não existir
+                os.makedirs("Dados", exist_ok=True)
+                
+                # Mover tudo do temp_dir para Dados
+                for item in os.listdir(temp_dir):
+                    source = os.path.join(temp_dir, item)
+                    destination = os.path.join("Dados", item)
+                    
+                    # Se já existir, remover primeiro
+                    if os.path.exists(destination):
+                        if os.path.isdir(destination):
+                            shutil.rmtree(destination)
+                        else:
+                            os.remove(destination)
+                    
+                    # Mover arquivo/pasta
+                    shutil.move(source, destination)
+                
+                # Limpar diretório temporário
+                shutil.rmtree(temp_dir)
+                
+                return True
+            else:
+                return False
+                
+        except Exception as e:
+            # Limpar diretório temporário em caso de erro
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            return False
 
 def check_data_files():
     """Verifica se todos os arquivos de dados necessários existem"""
-    required_files = [
-        "Dados/raw/mun_UTPs.csv",
-        "Dados/interim/aeroportos.parquet",
-        "Dados/interim/classificacao_pares.parquet",
-        "Dados/interim/comerciais.parquet",
-        "Dados/interim/executivos.parquet"
+    required_paths = [
+        "Dados/Entrada",
+        "Dados/Resultados"
     ]
     
-    missing_files = []
-    for file_path in required_files:
-        if not os.path.exists(file_path):
-            missing_files.append(file_path)
+    missing_paths = []
+    for path in required_paths:
+        if not os.path.exists(path) or not os.listdir(path):
+            missing_paths.append(path)
     
-    return missing_files
+    return missing_paths
 
 # Configuração da página
 st.set_page_config(
@@ -565,33 +546,91 @@ if not st.session_state.authenticated:
 
 # Aplicativo principal (só executa se autenticado)
 @st.cache_data
-def load_data():
-    # Verificar se os arquivos de dados existem, se não, tentar baixar
-    missing_files = check_data_files()
-    if missing_files:
-        if not download_data_files():
-            st.error("❌ Não foi possível baixar todos os dados necessários. Verifique a configuração.")
-            st.stop()
-    
+def load_municipios_data():
+    """Carrega dados para análise por municípios"""
     try:
+        # Verificar e baixar dados se necessário
+        if not download_data_files():
+            st.error("❌ Não foi possível baixar os dados necessários")
+            st.stop()
+        
         # Dados dos municípios
-        dados_municipios = pl.read_csv("Dados/raw/mun_UTPs.csv").rename({
+        dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
             'long_utp': 'long',
             'lat_utp': 'lat'
         }).with_columns(
             pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
         ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
         
-        # Dados de rotas
-        comerciais = pl.read_parquet("Dados/interim/comerciais.parquet")
-        executivos = pl.read_parquet("Dados/interim/executivos.parquet")
-        classificacao = pl.read_parquet("Dados/interim/classificacao_pares.parquet")
-        aeroportos = pl.read_parquet('Dados/interim/aeroportos.parquet')
+        # Dados de rotas de municípios
+        comerciais = pl.read_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet")
+        executivos = pl.read_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet")
+        classificacao = pl.read_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet")
+        aeroportos = pl.read_parquet('Dados/Entrada/aeroportos.parquet')
         
         return dados_municipios, comerciais, executivos, classificacao, aeroportos
         
     except Exception as e:
-        st.error(f"❌ Erro ao carregar dados: {str(e)}")
+        st.error(f"❌ Erro ao carregar dados de municípios: {str(e)}")
+        st.stop()
+
+@st.cache_data 
+def load_utp_data():
+    """Carrega dados para análise por UTPs"""
+    try:
+        # Verificar e baixar dados se necessário
+        if not download_data_files():
+            st.error("❌ Não foi possível baixar os dados necessários")
+            st.stop()
+        
+        # Dados das UTPs
+        dados_utps = pl.read_csv("Dados/Entrada/mun_UTPs.csv")
+        
+        # Criar mapeamento de UTPs
+        utp_info = dados_utps.select(['utp', 'nome_utp']).unique().sort('utp')
+        
+        # Dados de rotas de UTPs
+        comerciais = pl.read_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Comerciais.parquet")
+        executivos = pl.read_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Executivos.parquet")
+        classificacao = pl.read_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/classificacao_pares.parquet")
+        aeroportos = pl.read_parquet('Dados/Entrada/aeroportos.parquet')
+        
+        return dados_utps, utp_info, comerciais, executivos, classificacao, aeroportos
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar dados de UTPs: {str(e)}")
+        st.stop()
+
+@st.cache_data
+def load_centralidade_data():
+    """Carrega dados para análise por centralidades"""
+    try:
+        # Verificar e baixar dados se necessário
+        if not download_data_files():
+            st.error("❌ Não foi possível baixar os dados necessários")
+            st.stop()
+        
+        # Dados dos municípios (mesma base)
+        dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
+            'long_utp': 'long',
+            'lat_utp': 'lat'
+        }).with_columns(
+            pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
+        ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
+        
+        # Dados de centralidades  
+        dados_centralidades = pl.read_csv("Dados/Entrada/centralidades.csv")
+        
+        # Dados de rotas de centralidades
+        comerciais = pl.read_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet")
+        executivos = pl.read_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet")
+        classificacao = pl.read_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/classificacao_pares.parquet")
+        aeroportos = pl.read_parquet('Dados/Entrada/aeroportos.parquet')
+        
+        return dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos
+        
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar dados de centralidades: {str(e)}")
         st.stop()
 
 # Cache para lookups de coordenadas
@@ -627,13 +666,33 @@ def format_time(hours):
     except (ValueError, TypeError):
         return "N/A"
 
+def format_number_br(value, decimals=0):
+    """Formata números no padrão brasileiro (milhares com . e decimais com ,)"""
+    if value is None:
+        return "0"
+    try:
+        value_float = float(value)
+        if decimals == 0:
+            # Para números inteiros
+            formatted = f"{value_float:,.0f}"
+        else:
+            # Para números com decimais
+            formatted = f"{value_float:,.{decimals}f}"
+        
+        # Trocar separadores para padrão brasileiro
+        formatted = formatted.replace(",", "TEMP").replace(".", ",").replace("TEMP", ".")
+        return formatted
+    except (ValueError, TypeError):
+        return "N/A"
+
 def format_currency(value):
-    """Formata valor monetário"""
+    """Formata valor monetário no padrão brasileiro"""
     if value is None:
         return "R$ 0,00"
     try:
         value_float = float(value)
-        return f"R$ {value_float:,.2f}".replace(",", ".")
+        formatted = format_number_br(value_float, 2)
+        return f"R$ {formatted}"
     except (ValueError, TypeError):
         return "R$ N/A"
 
@@ -685,7 +744,7 @@ def remove_accents(text):
     without_accents = ''.join(c for c in normalized if unicodedata.category(c) != 'Mn')
     return without_accents
 
-def create_searchable_options(municipio_map):
+def create_searchable_options(municipio_map, is_utp=False):
     """Cria opções pesquisáveis com código e nome (incluindo busca sem acentos)"""
     options = []
     search_map = {}
@@ -716,7 +775,15 @@ def create_searchable_options(municipio_map):
             'search_texts': search_texts
         }
     
-    return sorted(options), search_map
+    # Ordenação especial para UTPs: por número, não por string
+    if is_utp:
+        # Ordenar por número UTP (extrair o número do início da string)
+        options.sort(key=lambda x: int(x.split(' - ')[0]) if ' - ' in x else 0)
+    else:
+        # Ordenação normal alfabética
+        options = sorted(options)
+    
+    return options, search_map
 
 def filter_options_by_search(options, search_map, search_term):
     """Filtra opções baseado no termo de busca"""
@@ -735,77 +802,14 @@ def filter_options_by_search(options, search_map, search_term):
     
     return filtered
 
-# Inicialização
-dados_municipios, comerciais, executivos, classificacao, aeroportos = load_data()
-
-# Criar dicionários de mapeamento código -> nome com UF
-@st.cache_data
-def create_mappings(comerciais, executivos, dados_municipios):
-    # Usar operações vetorizadas do Polars para melhor performance
-    mun_map = {}
-    
-    # Criar dicionário de UF baseado nos dados dos municípios
-    uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
-    
-    # De comerciais - usando concat para evitar loops
-    comerciais_origem = comerciais.select(['cod_mun_origem', 'mun_origem']).rename({
-        'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
-    })
-    comerciais_destino = comerciais.select(['cod_mun_destino', 'mun_destino']).rename({
-        'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
-    })
-    
-    # De executivos
-    executivos_origem = executivos.select(['cod_mun_origem', 'mun_origem']).rename({
-        'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
-    })
-    executivos_destino = executivos.select(['cod_mun_destino', 'mun_destino']).rename({
-        'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
-    })
-    
-    # Concatenar todas as combinações e remover duplicatas
-    todos_municipios = pl.concat([
-        comerciais_origem, comerciais_destino,
-        executivos_origem, executivos_destino
-    ]).unique()
-    
-    # Converter para dicionário adicionando UF
-    for row in todos_municipios.iter_rows(named=True):
-        codigo = row['codigo']
-        nome = row['nome']
-        uf = uf_map.get(codigo, '')
-        
-        # Formato: "Nome do Município, UF"
-        nome_com_uf = f"{nome}, {uf}" if uf else nome
-        mun_map[codigo] = nome_com_uf
-    
-    return mun_map
-
-municipio_map = create_mappings(comerciais, executivos, dados_municipios)
-mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
-
-# Criar opções pesquisáveis usando operações otimizadas
-@st.cache_data
-def get_unique_origins(comerciais, executivos):
-    origins_comerciais = set(comerciais['cod_mun_origem'].unique().to_list())
-    origins_executivos = set(executivos['cod_mun_origem'].unique().to_list())
-    return origins_comerciais.union(origins_executivos)
-
-unique_origins = get_unique_origins(comerciais, executivos)
-opcoes_origem_todas, search_map_origem = create_searchable_options({k: v for k, v in municipio_map.items() 
-                                                                   if k in unique_origins})
-
-# Site sempre inicia com tela inicial - sem valores padrão
-# Removido para garantir que sempre inicie vazio
-
-# Cabeçalho
+# Navegação principal
 st.markdown(f"""
 <div class="main-header">
     <h1>Sistema de Análise de Rotas Aéreas</h1>
 </div>
 """, unsafe_allow_html=True)
 
-# Sidebar para seleção
+# Sidebar com navegação
 with st.sidebar:
     # Header com informações do usuário e logout
     st.markdown(f"""
@@ -828,121 +832,312 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # st.markdown('<div style="margin-bottom: 0.3rem;"></div>', unsafe_allow_html=True)
-    st.markdown("### Seleção de Rota")
-    
-    # Inicializar contador de limpeza se não existir
-    if 'clear_counter' not in st.session_state:
-        st.session_state.clear_counter = 0
-    
-    
-
-    origem_selecionada_nome = st.selectbox(
-        "Origem",
-        options=opcoes_origem_todas,
-        index=None,
-        placeholder="Digite para buscar origem...",
-        key=f"origem_select_{st.session_state.clear_counter}",
-        label_visibility="visible"
+    # Seleção da página
+    st.markdown("### Tipo de Análise")
+    pagina_selecionada = st.selectbox(
+        "Escolha o tipo de análise:",
+        ["🏙️ Por Município (PIT 2023)", "🗺️ Por UTP (PIT 2023)", "🎯 Por Centralidade (SFPLAN)"],
+        label_visibility="collapsed"
     )
+
+# Determinar a página atual
+if "🏙️ Por Município" in pagina_selecionada:
+    pagina_atual = "municipios"
+elif "🗺️ Por UTP" in pagina_selecionada:
+    pagina_atual = "utps"
+else:
+    pagina_atual = "centralidades"
+
+# Carregar dados baseado na página selecionada
+if pagina_atual == "municipios":
+    dados_municipios, comerciais, executivos, classificacao, aeroportos = load_municipios_data()
     
-    # Obter código da origem selecionada
-    origem_selecionada = ""
-    if origem_selecionada_nome:
-        origem_selecionada = search_map_origem[origem_selecionada_nome]['codigo']
+    # Criar dicionários de mapeamento código -> nome com UF para municípios
+    @st.cache_data
+    def create_municipio_mappings(comerciais, executivos, dados_municipios):
+        mun_map = {}
+        uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
+        
+        comerciais_origem = comerciais.select(['cod_mun_origem', 'mun_origem']).rename({
+            'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
+        })
+        comerciais_destino = comerciais.select(['cod_mun_destino', 'mun_destino']).rename({
+            'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
+        })
+        executivos_origem = executivos.select(['cod_mun_origem', 'mun_origem']).rename({
+            'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
+        })
+        executivos_destino = executivos.select(['cod_mun_destino', 'mun_destino']).rename({
+            'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
+        })
+        
+        todos_municipios = pl.concat([
+            comerciais_origem, comerciais_destino,
+            executivos_origem, executivos_destino
+        ]).unique()
+        
+        for row in todos_municipios.iter_rows(named=True):
+            codigo = row['codigo']
+            nome = row['nome']
+            uf = uf_map.get(codigo, '')
+            nome_com_uf = f"{nome}, {uf}" if uf else nome
+            mun_map[codigo] = nome_com_uf
+        
+        return mun_map
     
-    # Filtrar destinos baseado na origem selecionada
-    if origem_selecionada:
-        destinos_disponiveis_cod = list(set(
-            comerciais.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list() +
-            executivos.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list()
-        ))
+    item_map = create_municipio_mappings(comerciais, executivos, dados_municipios)
+    mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
+    
+elif pagina_atual == "utps":
+    dados_utps, utp_info, comerciais, executivos, classificacao, aeroportos = load_utp_data()
+    
+    # Criar dicionários de mapeamento UTP
+    @st.cache_data
+    def create_utp_mappings(comerciais, executivos, dados_utps):
+        utp_map = {}
         
-        opcoes_destino_filtradas, search_map_destino = create_searchable_options({k: v for k, v in municipio_map.items() 
-                                                                                 if k in destinos_disponiveis_cod})
+        # Primeiro, criar mapeamento UTP -> nome_UTP
+        utp_nomes = dict(zip(dados_utps['utp'].to_list(), dados_utps['nome_utp'].to_list()))
         
-        # Sempre começar com destino vazio
-        default_destino_index = 0
+        # Coletar UTPs únicas de origem e destino
+        utps_origem = set(comerciais['UTP_origem'].unique().to_list())
+        utps_destino = set(comerciais['UTP_destino'].unique().to_list())
+        if executivos.height > 0:
+            utps_origem.update(executivos['UTP_origem'].unique().to_list())
+            utps_destino.update(executivos['UTP_destino'].unique().to_list())
+        
+        todas_utps = utps_origem.union(utps_destino)
+        
+        for utp_cod in todas_utps:
+            nome_utp = utp_nomes.get(utp_cod, f"UTP {utp_cod}")
+            utp_map[str(utp_cod)] = f"{utp_cod} - {nome_utp}"
+        
+        return utp_map
+    
+    item_map = create_utp_mappings(comerciais, executivos, dados_utps)
+    
+    # Para UTPs, usar coordenadas dos municípios sede
+    @st.cache_data 
+    def create_utp_coordinate_maps(dados_utps, aeroportos):
+        utp_coords = {}
+        
+        # Coordenadas das UTPs baseadas nos municípios sede
+        for row in dados_utps.filter(pl.col('sede') == True).iter_rows(named=True):
+            utp_coords[str(row['utp'])] = (row['lat_utp'], row['long_utp'])
+        
+        aero_coords = {}
+        for row in aeroportos.iter_rows(named=True):
+            aero_coords[row['icao']] = (row['latitude'], row['longitude'])
+        
+        return utp_coords, aero_coords
+    
+    mun_coords_cache, aero_coords_cache = create_utp_coordinate_maps(dados_utps, aeroportos)
+    
+else:  # centralidades
+    dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos = load_centralidade_data()
+    
+    # Criar dicionários de mapeamento código -> nome com UF para centralidades
+    @st.cache_data
+    def create_centralidade_mappings(comerciais, executivos, dados_municipios):
+        mun_map = {}
+        uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
+        
+        comerciais_origem = comerciais.select(['cod_mun_origem', 'mun_origem']).rename({
+            'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
+        })
+        comerciais_destino = comerciais.select(['cod_mun_destino', 'mun_destino']).rename({
+            'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
+        })
+        executivos_origem = executivos.select(['cod_mun_origem', 'mun_origem']).rename({
+            'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
+        })
+        executivos_destino = executivos.select(['cod_mun_destino', 'mun_destino']).rename({
+            'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
+        })
+        
+        todos_municipios = pl.concat([
+            comerciais_origem, comerciais_destino,
+            executivos_origem, executivos_destino
+        ]).unique()
+        
+        for row in todos_municipios.iter_rows(named=True):
+            codigo = row['codigo']
+            nome = row['nome']
+            uf = uf_map.get(codigo, '')
+            nome_com_uf = f"{nome}, {uf}" if uf else nome
+            mun_map[codigo] = nome_com_uf
+        
+        return mun_map
+    
+    item_map = create_centralidade_mappings(comerciais, executivos, dados_municipios)
+    mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
+
+# Criar opções pesquisáveis
+@st.cache_data
+def get_unique_origins_by_page(comerciais, executivos, pagina):
+    if pagina == "utps":
+        origins_comerciais = set(comerciais['UTP_origem'].unique().to_list())
+        origins_executivos = set(executivos['UTP_origem'].unique().to_list()) if executivos.height > 0 else set()
+        return {str(x) for x in origins_comerciais.union(origins_executivos)}
     else:
-        opcoes_destino_filtradas = []
-        search_map_destino = {}
-        default_destino_index = 0
+        origins_comerciais = set(comerciais['cod_mun_origem'].unique().to_list())
+        origins_executivos = set(executivos['cod_mun_origem'].unique().to_list()) if executivos.height > 0 else set()
+        return origins_comerciais.union(origins_executivos)
+
+unique_origins = get_unique_origins_by_page(comerciais, executivos, pagina_atual)
+opcoes_origem_todas, search_map_origem = create_searchable_options({k: v for k, v in item_map.items() 
+                                                                   if k in unique_origins}, 
+                                                                   is_utp=(pagina_atual == "utps"))
+
+# Inicializar contador de limpeza se não existir
+if 'clear_counter' not in st.session_state:
+    st.session_state.clear_counter = 0
+
+# Label dinâmico baseado na página
+if pagina_atual == "municipios":
+    origem_label = "Município de Origem"
+    destino_label = "Município de Destino"  
+    placeholder_origem = "Digite para buscar município de origem..."
+    placeholder_destino = "Digite para buscar município de destino..."
+elif pagina_atual == "utps":
+    origem_label = "UTP de Origem"
+    destino_label = "UTP de Destino"
+    placeholder_origem = "Digite para buscar UTP de origem..."
+    placeholder_destino = "Digite para buscar UTP de destino..."
+else:  # centralidades
+    origem_label = "Município de Origem"
+    destino_label = "Município de Destino"
+    placeholder_origem = "Digite para buscar centralidade de origem..."
+    placeholder_destino = "Digite para buscar centralidade de destino..."
+
+origem_selecionada_nome = st.sidebar.selectbox(
+    origem_label,
+    options=opcoes_origem_todas,
+    index=None,
+    placeholder=placeholder_origem,
+    key=f"origem_select_{st.session_state.clear_counter}_{pagina_atual}",
+    label_visibility="visible"
+)
+
+# Obter código da origem selecionada
+origem_selecionada = ""
+if origem_selecionada_nome:
+    origem_selecionada = search_map_origem[origem_selecionada_nome]['codigo']
+
+# Filtrar destinos baseado na origem selecionada e página atual
+if origem_selecionada:
+    if pagina_atual == "utps":
+        # Para UTPs, filtrar por UTP_origem e UTP_destino
+        destinos_comerciais = comerciais.filter(pl.col('UTP_origem') == int(origem_selecionada))['UTP_destino'].unique().to_list()
+        destinos_executivos = executivos.filter(pl.col('UTP_origem') == int(origem_selecionada))['UTP_destino'].unique().to_list() if executivos.height > 0 else []
+        destinos_disponiveis_cod = {str(x) for x in list(set(destinos_comerciais + destinos_executivos))}
+    else:
+        # Para municípios e centralidades
+        destinos_comerciais = comerciais.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list()
+        destinos_executivos = executivos.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list() if executivos.height > 0 else []
+        destinos_disponiveis_cod = set(destinos_comerciais + destinos_executivos)
+    
+    opcoes_destino_filtradas, search_map_destino = create_searchable_options({k: v for k, v in item_map.items() 
+                                                                             if k in destinos_disponiveis_cod}, 
+                                                                             is_utp=(pagina_atual == "utps"))
+else:
+    opcoes_destino_filtradas = []
+    search_map_destino = {}
+
+destino_selecionado_nome = st.sidebar.selectbox(
+    destino_label,
+    options=opcoes_destino_filtradas,
+    index=None,
+    placeholder=placeholder_destino,
+    key=f"destino_select_{st.session_state.clear_counter}_{pagina_atual}",
+    label_visibility="visible",
+    disabled=not origem_selecionada_nome
+)
+
+# Botão de limpeza discreto
+if st.sidebar.button("Limpar Seleção", type="secondary", use_container_width=True):
+    st.session_state.clear_counter += 1
+    st.rerun()
+
+st.sidebar.markdown("---")
+
+# Opções de visualização
+st.sidebar.markdown("### Opções de Visualização")
+mostrar_todas_rotas = st.sidebar.checkbox("Mostrar todas as rotas simultaneamente", value=False)
+
+# Obter códigos das seleções
+origem_selecionada = ""
+if origem_selecionada_nome:
+    origem_selecionada = search_map_origem[origem_selecionada_nome]['codigo']
+
+destino_selecionado = ""
+if destino_selecionado_nome and destino_selecionado_nome in search_map_destino:
+    destino_selecionado = search_map_destino[destino_selecionado_nome]['codigo']
+
+st.sidebar.markdown("---")
+
+if origem_selecionada and destino_selecionado:
+    # Verificar tipo de voo baseado na página
+    if pagina_atual == "utps":
+        # Para UTPs, buscar municípios da UTP e depois verificar na classificação
+        municipios_origem = dados_utps.filter(pl.col('utp') == int(origem_selecionada))['municipio'].unique().to_list()
+        municipios_destino = dados_utps.filter(pl.col('utp') == int(destino_selecionado))['municipio'].unique().to_list()
+        
+        # Buscar qualquer combinação de municípios entre as UTPs na classificação
+        tipo_voo = classificacao.filter(
+            (pl.col('cod_mun_origem').cast(pl.Utf8).is_in([str(m) for m in municipios_origem])) & 
+            (pl.col('cod_mun_destino').cast(pl.Utf8).is_in([str(m) for m in municipios_destino]))
+        )
+    else:
+        # Para municípios e centralidades
+        tipo_voo = classificacao.filter(
+            (pl.col('cod_mun_origem') == origem_selecionada) & 
+            (pl.col('cod_mun_destino') == destino_selecionado)
+        )
+    
+    if tipo_voo.height > 0:
+        tipo = tipo_voo['tipo_voo'][0]
+        st.sidebar.markdown(f"""
+        <div class="info-card">
+            <strong>Tipo de Voo:</strong> {tipo}
+        </div>
+        """, unsafe_allow_html=True)
     
 
-    destino_selecionado_nome = st.selectbox(
-        "Destino",
-        options=opcoes_destino_filtradas,
-        index=None,
-        placeholder="Digite para buscar destino...",
-        key=f"destino_select_{st.session_state.clear_counter}",
-        label_visibility="visible",
-        disabled=not origem_selecionada_nome
-    )
-    
-    # Botão de limpeza discreto
-    if st.button("Limpar Seleção", type="secondary", use_container_width=True):
-        st.session_state.clear_counter += 1
-        st.rerun()
-    
-    
-    
-    st.markdown("---")
-   
-    # Opções de visualização
-    st.markdown("### Opções de Visualização")
-    mostrar_todas_rotas = st.checkbox("Mostrar todas as rotas simultaneamente", value=False)
-    # Métricas sempre ativadas por padrão
-    mostrar_metricas = True
-    
-     
-    # Obter códigos das seleções
-    origem_selecionada = ""
-    if origem_selecionada_nome:
-        origem_selecionada = search_map_origem[origem_selecionada_nome]['codigo']
-    
-    destino_selecionado = ""
-    if destino_selecionado_nome and destino_selecionado_nome in search_map_destino:
-        destino_selecionado = search_map_destino[destino_selecionado_nome]['codigo']
-    
-
-
-        st.markdown("---")
-    
-    if origem_selecionada and destino_selecionado:
-            # Verificar tipo de voo
-            tipo_voo = classificacao.filter(
-                (pl.col('cod_mun_origem') == origem_selecionada) & 
-                (pl.col('cod_mun_destino') == destino_selecionado)
-            )
-            
-            if tipo_voo.height > 0:
-                tipo = tipo_voo['tipo_voo'][0]
-                st.markdown(f"""
-                <div class="info-card">
-                    <strong>Tipo de Voo:</strong> {tipo}
-                </div>
-                """, unsafe_allow_html=True)
-    
-
-    # Header informativo com contexto geográfico
-    if origem_selecionada_nome and destino_selecionado_nome:
-        # Calcular distância aproximada (coordenadas)
+# Header informativo com contexto geográfico
+if origem_selecionada_nome and destino_selecionado_nome:
+    # Calcular distância aproximada (coordenadas)
+    if pagina_atual == "utps":
+        coord_orig = mun_coords_cache.get(origem_selecionada, (None, None))
+        coord_dest = mun_coords_cache.get(destino_selecionado, (None, None))
+    else:
         coord_orig = get_mun_coord(origem_selecionada, mun_coords_cache)
         coord_dest = get_mun_coord(destino_selecionado, mun_coords_cache)
         
-        if coord_orig[0] and coord_dest[0]:
-            # Calcular distância em linha reta (fórmula de Haversine simplificada)
-            lat1, lon1 = coord_orig
-            lat2, lon2 = coord_dest
-            import math
-            
-            dlat = math.radians(lat2 - lat1)
-            dlon = math.radians(lon2 - lon1)
-            a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-            c = 2 * math.asin(math.sqrt(a))
-            distancia_km = int(6371 * c)  # Raio da Terra em km
-            
-            # Determinar regiões
+    if coord_orig[0] and coord_dest[0]:
+        # Calcular distância em linha reta (fórmula de Haversine simplificada)
+        lat1, lon1 = coord_orig
+        lat2, lon2 = coord_dest
+        import math
+        
+        dlat = math.radians(lat2 - lat1)
+        dlon = math.radians(lon2 - lon1)
+        a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+        c = 2 * math.asin(math.sqrt(a))
+        distancia_km = int(6371 * c)  # Raio da Terra em km
+        
+        # Determinar regiões baseado no tipo de página
+        if pagina_atual == "utps":
+            # Para UTPs, extrair nomes das opções selecionadas
+            origem_nome_display = origem_selecionada_nome.split(' - ')[-1] if ' - ' in origem_selecionada_nome else origem_selecionada_nome
+            destino_nome_display = destino_selecionado_nome.split(' - ')[-1] if ' - ' in destino_selecionado_nome else destino_selecionado_nome
+            tipo_viagem = "🗺️ Viagem entre UTPs"
+            origem_uf = ""
+            destino_uf = ""
+        else:
+            # Para municípios e centralidades
+            origem_nome_display = origem_selecionada_nome.split(',')[0] if ',' in origem_selecionada_nome else origem_selecionada_nome
+            destino_nome_display = destino_selecionado_nome.split(',')[0] if ',' in destino_selecionado_nome else destino_selecionado_nome
             origem_uf = origem_selecionada_nome.split(', ')[-1] if ', ' in origem_selecionada_nome else ""
             destino_uf = destino_selecionado_nome.split(', ')[-1] if ', ' in destino_selecionado_nome else ""
             
@@ -951,48 +1146,54 @@ with st.sidebar:
                 tipo_viagem = "🏠 Viagem Estadual"
             else:
                 tipo_viagem = "🌎 Viagem Interestadual"
+        
+        # Classificar distância
+        if distancia_km < 300:
+            categoria_dist = "📍 Curta Distância"
+        elif distancia_km < 800:
+            categoria_dist = "🛣️ Média Distância"
+        else:
+            categoria_dist = "✈️ Longa Distância"
             
-            # Classificar distância
-            if distancia_km < 300:
-                categoria_dist = "📍 Curta Distância"
-            elif distancia_km < 800:
-                categoria_dist = "🛣️ Média Distância"
-            else:
-                categoria_dist = "✈️ Longa Distância"
-                
-            st.markdown(f"""
-            <div style="
-                background: linear-gradient(135deg, #21273f 0%, #212266 100%);
-                color: white;
-                padding: 1.7rem;
-                border-radius: 15px;
-                margin: 1rem 0;
-                text-align: center;
-                box-shadow: 0 8px 32px rgba(0,0,0,0.1);
-            ">
-                <h3 style="margin: 0 0 1rem 0;">
-                    {origem_selecionada_nome.split(',')[0]} → {destino_selecionado_nome.split(',')[0]}
-                </h3>
-                <div style="display: flex; justify-content: space-around; flex-wrap: wrap; gap: 1rem;">
-                    <div>
-                        <div style="font-size: 1.2rem; font-weight: bold;">{distancia_km:,} km</div>
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Distância Direta</div>
-                    </div>
-                    <div>
-                        <div style="font-size: 1.2rem; font-weight: bold;">{tipo_viagem}</div>
-                        <div style="font-size: 0.9rem; opacity: 0.9;">{origem_uf} → {destino_uf}</div>
-                    </div>
-                    <div>
-                        <div style="font-size: 1.2rem; font-weight: bold;">{categoria_dist}</div>
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Categoria</div>
-                    </div>
+        st.markdown(f"""
+        <div style="
+            background: linear-gradient(135deg, #21273f 0%, #212266 100%);
+            color: white;
+            padding: 1.7rem;
+            border-radius: 15px;
+            margin: 1rem 0;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+        ">
+            <h3 style="margin: 0 0 1rem 0;">
+                {origem_nome_display} → {destino_nome_display}
+            </h3>
+            <div style="display: flex; justify-content: space-around; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <div style="font-size: 1.2rem; font-weight: bold;">{format_number_br(distancia_km)} km</div>
+                    <div style="font-size: 0.9rem; opacity: 0.9;">Distância Direta</div>
+                </div>
+                <div>
+                    <div style="font-size: 1.2rem; font-weight: bold;">{tipo_viagem}</div>
+                    <div style="font-size: 0.9rem; opacity: 0.9;">{origem_uf + ' → ' + destino_uf if origem_uf and destino_uf else 'Análise Regional'}</div>
+                </div>
+                <div>
+                    <div style="font-size: 1.2rem; font-weight: bold;">{categoria_dist}</div>
+                    <div style="font-size: 0.9rem; opacity: 0.9;">Categoria</div>
                 </div>
             </div>
-            """, unsafe_allow_html=True)
-            
+        </div>
+        """, unsafe_allow_html=True)
+        
+    else:
+        if pagina_atual == "utps":
+            st.success(f"Rota: {origem_selecionada_nome.split(' - ')[-1]} → {destino_selecionado_nome.split(' - ')[-1]}")
         else:
             st.success(f"Rota: {origem_selecionada_nome.split(',')[0]} → {destino_selecionado_nome.split(',')[0]}")
-    elif origem_selecionada_nome:
+elif origem_selecionada_nome:
+    if pagina_atual == "utps":
+        st.info(f"Origem selecionada: {origem_selecionada_nome.split(' - ')[-1]} • Selecione o destino para análise completa")
+    else:
         st.info(f"Origem selecionada: {origem_selecionada_nome.split(',')[0]} • Selecione o destino para análise completa")
     
     
@@ -1000,22 +1201,39 @@ with st.sidebar:
 
 # Área principal
 if origem_selecionada and destino_selecionado:
-    # Obter nome dos municípios
-    nome_origem = municipio_map.get(origem_selecionada, origem_selecionada)
-    nome_destino = municipio_map.get(destino_selecionado, destino_selecionado)
+    # Obter nome baseado na página atual
+    if pagina_atual == "utps":
+        nome_origem = item_map.get(origem_selecionada, origem_selecionada).split(' - ')[-1]
+        nome_destino = item_map.get(destino_selecionado, destino_selecionado).split(' - ')[-1]
+    else:
+        nome_origem = item_map.get(origem_selecionada, origem_selecionada)
+        nome_destino = item_map.get(destino_selecionado, destino_selecionado)
     
     st.markdown(f"## Rota: {nome_origem} → {nome_destino}")
     
-    # Verificar se é voo executivo ou comercial
-    voos_executivos = executivos.filter(
-        (pl.col('cod_mun_origem') == origem_selecionada) & 
-        (pl.col('cod_mun_destino') == destino_selecionado)
-    )
-    
-    voos_comerciais = comerciais.filter(
-        (pl.col('cod_mun_origem') == origem_selecionada) & 
-        (pl.col('cod_mun_destino') == destino_selecionado)
-    )
+    # Verificar se é voo executivo ou comercial baseado na página
+    if pagina_atual == "utps":
+        # Para UTPs, filtrar por UTP_origem e UTP_destino
+        voos_executivos = executivos.filter(
+            (pl.col('UTP_origem') == int(origem_selecionada)) & 
+            (pl.col('UTP_destino') == int(destino_selecionado))
+        )
+        
+        voos_comerciais = comerciais.filter(
+            (pl.col('UTP_origem') == int(origem_selecionada)) & 
+            (pl.col('UTP_destino') == int(destino_selecionado))
+        )
+    else:
+        # Para municípios e centralidades
+        voos_executivos = executivos.filter(
+            (pl.col('cod_mun_origem') == origem_selecionada) & 
+            (pl.col('cod_mun_destino') == destino_selecionado)
+        )
+        
+        voos_comerciais = comerciais.filter(
+            (pl.col('cod_mun_origem') == origem_selecionada) & 
+            (pl.col('cod_mun_destino') == destino_selecionado)
+        )
     
     if voos_executivos.height > 0:
         # Voo executivo - Display especial e prominente
@@ -1072,16 +1290,28 @@ if origem_selecionada and destino_selecionado:
             """, unsafe_allow_html=True)
         
         with col3:
-            st.markdown(f"""
-            <div class="metric-container">
-                <p class="metric-label">Viagens Realizadas</p>
-                <p class="metric-value">{int(voo['viagens']):,}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            if pagina_atual != "centralidades":
+                st.markdown(f"""
+                <div class="metric-container">
+                    <p class="metric-label">Viagens Realizadas</p>
+                    <p class="metric-value">{format_number_br(int(voo['viagens']))}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div class="metric-container">
+                    <p class="metric-label">Tipo de Análise</p>
+                    <p class="metric-value">Centralidade</p>
+                </div>
+                """, unsafe_allow_html=True)
         
         # Criar mapa
-        coord_origem = get_mun_coord(origem_selecionada, mun_coords_cache)
-        coord_destino = get_mun_coord(destino_selecionado, mun_coords_cache)
+        if pagina_atual == "utps":
+            coord_origem = mun_coords_cache.get(origem_selecionada, (None, None))
+            coord_destino = mun_coords_cache.get(destino_selecionado, (None, None))
+        else:
+            coord_origem = get_mun_coord(origem_selecionada, mun_coords_cache)
+            coord_destino = get_mun_coord(destino_selecionado, mun_coords_cache)
         
         if coord_origem[0] and coord_destino[0]:
             # Calcular centro do mapa
@@ -1171,7 +1401,10 @@ if origem_selecionada and destino_selecionado:
             # Seleção de rota
             if not mostrar_todas_rotas:
                 st.markdown("**Rota Específica:**")
-                opcoes_rotas = [f"Rota {i+1} - {r['percentual']:.1f}% das viagens" for i, r in enumerate(rotas)]
+                if pagina_atual != "centralidades":
+                    opcoes_rotas = [f"Rota {i+1} - {format_number_br(r['percentual'], 1)}% das viagens" for i, r in enumerate(rotas)]
+                else:
+                    opcoes_rotas = [f"Rota {i+1} - {format_number_br(r['percentual'], 1)}% do tráfego" for i, r in enumerate(rotas)]
                 rota_selecionada = st.selectbox(
                     "Selecionar rota:",
                     opcoes_rotas,
@@ -1186,6 +1419,10 @@ if origem_selecionada and destino_selecionado:
                 
                 # Mostrar indicador de rota principal
                 st.markdown("**Rota Principal (maior percentual):**")
+                if pagina_atual != "centralidades":
+                    percentual_texto = f"{format_number_br(rota_atual['percentual'], 1)}% das viagens"
+                else:
+                    percentual_texto = f"{format_number_br(rota_atual['percentual'], 1)}% do tráfego"
                 st.markdown(f"""
                 <div style="
                     background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
@@ -1195,7 +1432,7 @@ if origem_selecionada and destino_selecionado:
                     font-size: 0.9rem;
                     margin-bottom: 0.5rem;
                 ">
-                    Rota 1 - {rota_atual['percentual']:.1f}% das viagens
+                    Rota 1 - {percentual_texto}
                 </div>
                 """, unsafe_allow_html=True)
             
@@ -1218,7 +1455,7 @@ if origem_selecionada and destino_selecionado:
                 <div style="margin-bottom: 0.8rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <span style="font-size: 0.9rem; color: #6c757d; font-weight: 500;">CUSTO TOTAL</span>
-                        <span style="font-size: 1.1rem; font-weight: 600; color: #e74c3c;">{format_currency(rota_atual['custo_total'])}</span>
+                        <span style="font-size: 1.1rem; font-weight: 600; color: #16af2a;">{format_currency(rota_atual['custo_total'])}</span>
                     </div>
                 </div>
                 <div style="margin-bottom: 0.8rem;">
@@ -1242,7 +1479,7 @@ if origem_selecionada and destino_selecionado:
                 <div style="margin-bottom: 0.8rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <span style="font-size: 0.9rem; color: #6c757d; font-weight: 500;">CUSTO TERRESTRE</span>
-                        <span style="font-size: 1rem; font-weight: 500; color: #28a745;">{format_currency(rota_atual['custo_terrestre_embarque'] + rota_atual['custo_terrestre_desembarque'])}</span>
+                        <span style="font-size: 1rem; font-weight: 500; color: #1f0e85;">{format_currency(rota_atual['custo_terrestre_embarque'] + rota_atual['custo_terrestre_desembarque'])}</span>
                     </div>
                 </div>
                 <div style="margin-bottom: 0.8rem;">
@@ -1268,10 +1505,10 @@ if origem_selecionada and destino_selecionado:
                     <span style="font-size: 0.85rem; opacity: 0.9;">DETALHES DO TRAJETO</span>
                 </div>
                 <div style="margin-bottom: 0.5rem;">
-                    <strong>Viagens:</strong> {rota_atual['viagens']:,}
+                    <strong>{'Viagens' if pagina_atual != 'centralidades' else 'Fluxo'}:</strong> {format_number_br(rota_atual['viagens'])}
                 </div>
                 <div style="margin-bottom: 0.5rem;">
-                    <strong>Percentual:</strong> {rota_atual['percentual']:.1f}%
+                    <strong>Percentual:</strong> {format_number_br(rota_atual['percentual'], 1)}%
                 </div>
                 <div>
                     <strong>Rota Aérea:</strong> {rota_atual['trajeto']}
@@ -1295,8 +1532,12 @@ if origem_selecionada and destino_selecionado:
             """, unsafe_allow_html=True)
             
             # Criar mapa
-            coord_origem = get_mun_coord(origem_selecionada, mun_coords_cache)
-            coord_destino = get_mun_coord(destino_selecionado, mun_coords_cache)
+            if pagina_atual == "utps":
+                coord_origem = mun_coords_cache.get(origem_selecionada, (None, None))
+                coord_destino = mun_coords_cache.get(destino_selecionado, (None, None))
+            else:
+                coord_origem = get_mun_coord(origem_selecionada, mun_coords_cache)
+                coord_destino = get_mun_coord(destino_selecionado, mun_coords_cache)
             
             if coord_origem[0] and coord_destino[0]:
                 # Calcular centro e zoom do mapa
@@ -1546,38 +1787,50 @@ if origem_selecionada and destino_selecionado:
             
             dados_tabela = []
             for i, rota in enumerate(rotas):
-                dados_tabela.append({
+                linha_dados = {
                     'Rota': f"Rota {i+1}",
                     'Trajeto': rota['trajeto'],
                     'Tempo Total': format_time(rota['tempo_total']),
                     'Custo Total (R$)': format_currency_for_table(rota['custo_total']),
-                    'Uso (%)': f"{rota['percentual']:.1f}%",
-                    'Viagens': rota['viagens'],  # Mantém como número para ordenação
+                    'Uso (%)': f"{format_number_br(rota['percentual'], 1)}%",
                     'Conexões': rota['conexoes']
-                })
+                }
+                
+                # Só adicionar coluna de viagens se não for centralidades
+                if pagina_atual != "centralidades":
+                    linha_dados['Viagens'] = rota['viagens']
+                
+                dados_tabela.append(linha_dados)
             
             df_tabela = pl.DataFrame(dados_tabela)
+            
+            # Configuração das colunas dinâmica
+            column_config = {
+                'Custo Total (R$)': st.column_config.NumberColumn(
+                    'Custo Total (R$)',
+                    format="R$ %.2f",
+                    help="Custo total da rota em reais"
+                ),
+                'Conexões': st.column_config.NumberColumn(
+                    'Conexões',
+                    format="%d",
+                    help="Número de conexões na rota"
+                )
+            }
+            
+            # Só adicionar configuração de viagens se não for centralidades
+            if pagina_atual != "centralidades":
+                column_config['Viagens'] = st.column_config.NumberColumn(
+                    'Viagens',
+                    format="%d",
+                    help="Número total de viagens"
+                )
+            
             st.dataframe(
                 df_tabela,
                 width='stretch',
                 hide_index=True,
-                column_config={
-                    'Custo Total (R$)': st.column_config.NumberColumn(
-                        'Custo Total (R$)',
-                        format="R$ %.2f",
-                        help="Custo total da rota em reais"
-                    ),
-                    'Viagens': st.column_config.NumberColumn(
-                        'Viagens',
-                        format="%d",
-                        help="Número total de viagens"
-                    ),
-                    'Conexões': st.column_config.NumberColumn(
-                        'Conexões',
-                        format="%d",
-                        help="Número de conexões na rota"
-                    )
-                }
+                column_config=column_config
             )
             st.markdown("---")
             
@@ -1647,7 +1900,7 @@ if origem_selecionada and destino_selecionado:
                 ">
                     <h5 style="margin: 0;">🎯 Mais Popular</h5>
                     <p style="margin: 0.5rem 0 0 0; font-size: 1.1rem; font-weight: bold;">
-                        {rota_mais_popular['percentual']:.1f}%
+                        {format_number_br(rota_mais_popular['percentual'], 1)}%
                     </p>
                     <small>Rota {rotas.index(rota_mais_popular) + 1}</small>
                 </div>
@@ -1662,6 +1915,22 @@ if origem_selecionada and destino_selecionado:
             st.markdown("### Distribuição de Uso das Rotas")
             
             # Gráfico donut
+            if pagina_atual != "centralidades":
+                # Para hover, usar formatação manual pois Plotly não suporta formato brasileiro
+                hover_template = ('<b>%{label}</b><br>' +
+                               'Uso: %{percent}<br>' +
+                               'Viagens: %{customdata}<br>' +
+                               'Trajeto: %{text}<extra></extra>')
+                customdata_formatted = [format_number_br(r['viagens']) for r in rotas]
+                texto_central = f"Total<br>{format_number_br(sum(r['viagens'] for r in rotas))}<br>viagens"
+            else:
+                hover_template = ('<b>%{label}</b><br>' +
+                               'Uso: %{percent}<br>' +
+                               'Fluxo: %{customdata}<br>' +
+                               'Trajeto: %{text}<extra></extra>')
+                customdata_formatted = [format_number_br(r['viagens']) for r in rotas]
+                texto_central = f"Total<br>{format_number_br(sum(r['viagens'] for r in rotas))}<br>fluxo"
+            
             fig = go.Figure(data=[
                 go.Pie(
                     labels=[f"Rota {i+1}" for i in range(len(rotas))],
@@ -1670,11 +1939,8 @@ if origem_selecionada and destino_selecionado:
                     marker_colors=cores_rotas[:len(rotas)],
                     textinfo='label+percent',
                     textposition='inside',
-                    hovertemplate='<b>%{label}</b><br>' +
-                                'Uso: %{percent}<br>' +
-                                'Viagens: %{customdata:,}<br>' +
-                                'Trajeto: %{text}<extra></extra>',
-                    customdata=[r['viagens'] for r in rotas],
+                    hovertemplate=hover_template,
+                    customdata=customdata_formatted,
                     text=[r['trajeto'] for r in rotas]
                 )
             ])
@@ -1701,7 +1967,7 @@ if origem_selecionada and destino_selecionado:
             
             # Adicionar texto central
             fig.add_annotation(
-                text=f"Total<br>{sum(r['viagens'] for r in rotas):,.0f}<br>viagens",
+                text=texto_central,
                 x=0.5, y=0.5,
                 font_size=16,
                 showarrow=False,
@@ -1715,43 +1981,54 @@ if origem_selecionada and destino_selecionado:
         
 else:
     # Dashboard inicial com informações ricas
-    st.markdown("### 📈 Panorama Geral do Sistema")
+    if pagina_atual == "municipios":
+        st.markdown("### 📈 Panorama Geral - Análise por Municípios")
+        titulo_total = "Total de Municípios"
+        total_entidades = len(dados_municipios)
+    elif pagina_atual == "utps":
+        st.markdown("### 📈 Panorama Geral - Análise por UTPs")
+        titulo_total = "Total de UTPs"
+        total_entidades = len(dados_utps['utp'].unique())
+    else:
+        st.markdown("### 📈 Panorama Geral - Análise por Centralidades")
+        titulo_total = "Total de Centralidades"
+        total_entidades = len(dados_centralidades)
     
     # Estatísticas nacionais impressionantes
-    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
     
-    # Calcular estatísticas gerais
-    total_municipios = len(get_unique_origins(comerciais, executivos))
-    total_conexoes = comerciais.height + executivos.height
-    media_viagens_comerciais = comerciais['viagens'].mean() if 'viagens' in comerciais.columns else 0
+    # Calcular pares únicos ao invés de rotas individuais
+    if pagina_atual == "utps":
+        # Para UTPs, contar pares únicos UTP_origem x UTP_destino
+        pares_comerciais = comerciais.select(['UTP_origem', 'UTP_destino']).unique().height
+        pares_executivos = executivos.select(['UTP_origem', 'UTP_destino']).unique().height if executivos.height > 0 else 0
+    else:
+        # Para municípios e centralidades, contar pares únicos cod_mun_origem x cod_mun_destino
+        pares_comerciais = comerciais.select(['cod_mun_origem', 'cod_mun_destino']).unique().height
+        pares_executivos = executivos.select(['cod_mun_origem', 'cod_mun_destino']).unique().height if executivos.height > 0 else 0
+    
+    total_pares = pares_comerciais + pares_executivos
+    percentual_comercial = (pares_comerciais / total_pares) * 100 if total_pares > 0 else 0
     
     with col_stat1:
         st.metric(
-            label="🏙️ Municípios Conectados", 
-            value=f"{total_municipios:,}".replace(",", "."),
-            help="Total de municípios com conexões aéreas"
+            label=f"🏙️ {titulo_total}", 
+            value=format_number_br(total_entidades),
+            help=f"Total de {titulo_total.lower()} disponíveis no sistema"
         )
         
     with col_stat2:
         st.metric(
-            label="🛫 Total de Conexões", 
-            value=f"{total_conexoes:,}".replace(",", "."),
-            help="Soma de rotas comerciais e executivas"
+            label="🔗 Pares OD Aéreos", 
+            value=format_number_br(total_pares),
+            help="Total de pares únicos origem-destino"
         )
         
     with col_stat3:
         st.metric(
-            label="📊 Média Viagens/Rota", 
-            value=f"{media_viagens_comerciais:,.0f}".replace(",", "."),
-            help="Média de viagens por rota comercial"
-        )
-        
-    with col_stat4:
-        percentual_comercial = (comerciais.height / total_conexoes) * 100 if total_conexoes > 0 else 0
-        st.metric(
-            label="✈️ Rotas Comerciais", 
-            value=f"{percentual_comercial:.1f}%",
-            help="Percentual de rotas comerciais vs. executivas"
+            label="✈️ Pares OD Aéreos Comerciais", 
+            value=f"{format_number_br(percentual_comercial, 1)}%",
+            help="Percentual de pares OD aéreos comerciais"
         )
     
   
@@ -1759,17 +2036,29 @@ else:
     st.info("👆 Selecione uma origem e destino na barra lateral para explorar rotas específicas e suas análises detalhadas.")
     
     # Estatísticas gerais
-    with st.expander("Estatísticas Gerais do Sistema", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            total_rotas_comerciais = comerciais.height
-            st.metric("Total de Rotas Comerciais", f"{total_rotas_comerciais:,}")
-        
-        with col2:
-            total_rotas_executivas = executivos.height
-            st.metric("Total de Rotas Executivas", f"{total_rotas_executivas:,}")
-        
-        with col3:
-            total_viagens = comerciais['viagens'].sum() + executivos['viagens'].sum()
-            st.metric("Total de Viagens", f"{int(total_viagens):,}")
+    with st.expander("Estatísticas Detalhadas do Sistema", expanded=True):
+        if pagina_atual == "centralidades":
+            # Para centralidades, não mostrar viagens (dados inventados)
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.metric("Pares Comerciais", format_number_br(pares_comerciais))
+            
+            with col2:
+                st.metric("Pares Executivos", format_number_br(pares_executivos))
+        else:
+            # Para municípios e UTPs, mostrar estatísticas completas
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Pares Comerciais", format_number_br(pares_comerciais))
+            
+            with col2:
+                st.metric("Pares Executivos", format_number_br(pares_executivos))
+            
+            with col3:
+                if 'viagens' in comerciais.columns and 'viagens' in executivos.columns:
+                    total_viagens = comerciais['viagens'].sum() + executivos['viagens'].sum()
+                    st.metric("Total de Viagens", format_number_br(int(total_viagens)))
+                else:
+                    st.metric("Rotas Totais", format_number_br(comerciais.height + executivos.height))
