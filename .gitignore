@@ -1,15 +1,7 @@
-# Arquivos de configuração sensíveis - NUNCA FAZER COMMIT!
+# Arquivos de configuração sensíveis 
 .streamlit/secrets.toml
 secrets.toml
 *.toml
-
-# Documentação com senhas - NUNCA FAZER COMMIT!
-DEPLOY_GUIDE.md
-*DEPLOY*
-*deploy*
-*PASSWORD*
-*SECRETS*
-*CREDENTIALS*
 
 # Cache do Python
 __pycache__/
