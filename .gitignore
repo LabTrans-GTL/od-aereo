@@ -42,6 +42,7 @@ venv.bak/
 *.swp
 *.swo
 *~
+Dados Backup/
 
 # Logs
 *.log
