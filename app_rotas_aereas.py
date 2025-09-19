@@ -30,7 +30,7 @@ def optimize_memory():
     gc.collect()  # Força limpeza de memória
     
 def check_memory_usage():
-    """Monitora uso de memória e alerta se necessário"""
+    """Monitora uso de memória e limpa cache silenciosamente se necessário"""
     if not PSUTIL_AVAILABLE:
         return 0
         
@@ -38,10 +38,9 @@ def check_memory_usage():
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
         
-        # Alerta se memória > 512MB (ajustado para ambiente de deploy)
+        # Limpar cache silenciosamente se memória > 512MB
         if memory_mb > 512:
-            st.warning(f"⚠️ Alto uso de memória: {memory_mb:.1f}MB - Limpando cache...")
-            # Limpar cache do Streamlit quando memória alta
+            # Limpar cache do Streamlit quando memória alta (sem aviso)
             st.cache_data.clear()
             optimize_memory()
             
@@ -463,25 +462,16 @@ def load_municipios_data():
         # Forçar limpeza antes de carregar dados grandes
         optimize_memory()
         
-        # Dados de rotas de municípios (arquivos parquet criptografados) - com otimização
-        with st.spinner("Carregando dados comerciais..."):
-            comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
-            
-        with st.spinner("Carregando dados executivos..."):
-            executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
-            
-        with st.spinner("Carregando classificações..."):
-            classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
-            
-        with st.spinner("Carregando aeroportos..."):
-            aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        # Dados de rotas de municípios (arquivos parquet criptografados) - carregamento silencioso
+        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
+        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
+        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
+        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
         
         # Verificar uso final de memória
         final_memory = check_memory_usage()
         
-        # Log de uso de memória (apenas em desenvolvimento)
-        if st.secrets.get("DEBUG_MODE", False):
-            st.info(f"📊 Memória carregada: {final_memory - initial_memory:.1f}MB")
+        # Log de uso de memória removido - operação silenciosa
         
         return dados_municipios, comerciais, executivos, classificacao, aeroportos
         
