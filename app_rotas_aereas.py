@@ -174,32 +174,18 @@ def _decode_b64_value(value: str) -> bytes:
         return base64.b64decode(value[4:])
     return value.encode()
 
-def _generate_system_entropy() -> bytes:
-    """Gera entropia baseada no sistema para tornar a chave única por ambiente"""
-    # Combinar várias características do sistema de forma determinística
-    system_info = []
+def _generate_fixed_entropy(config: dict) -> bytes:
+    """Gera entropia fixa baseada nas configurações do secrets.toml para compatibilidade entre ambientes"""
+    # Usar configurações do secrets.toml para gerar entropia determinística
+    entropy_components = [
+        config['entropy_factor'],
+        config['salt_primary'], 
+        config['salt_secondary'],
+        "od_aero_fixed_entropy_2024"
+    ]
     
-    try:
-        # Informações do sistema operacional
-        system_info.append(platform.system())
-        system_info.append(platform.machine())
-        system_info.append(platform.processor()[:50] if platform.processor() else "unknown")
-        
-        # Informações do Python e ambiente
-        system_info.append(platform.python_version())
-        system_info.append(str(os.getcwd()))
-        
-        # Características do diretório atual (se existir)
-        current_dir = Path.cwd()
-        if current_dir.exists():
-            system_info.append(str(current_dir.stat().st_mode))
-        
-    except Exception:
-        # Fallback em caso de erro
-        system_info = ["fallback", "entropy", "system"]
-    
-    # Combinar tudo em uma string determinística
-    combined = "_".join(system_info)
+    # Combinar todos os componentes
+    combined = "_".join(entropy_components)
     return hashlib.sha256(combined.encode()).digest()
 
 def _derive_multilayer_key(password: str) -> bytes:
@@ -220,8 +206,8 @@ def _derive_multilayer_key(password: str) -> bytes:
         st.error("❌ Erro ao decodificar configurações criptográficas.")
         st.stop()
     
-    # Camada 2: Gerar entropia do sistema
-    system_entropy = _generate_system_entropy()
+    # Camada 2: Gerar entropia fixa compatível entre ambientes
+    fixed_entropy = _generate_fixed_entropy(config)
     
     # Camada 3: Combinar senha com fator de entropia
     enhanced_password = f"{password}_{config['entropy_factor']}"
@@ -230,7 +216,7 @@ def _derive_multilayer_key(password: str) -> bytes:
     kdf1 = PBKDF2HMAC(
         algorithm=hashes.SHA512(),
         length=64,
-        salt=salt_primary + system_entropy[:16],
+        salt=salt_primary + fixed_entropy[:16],
         iterations=200000,
     )
     intermediate_key1 = kdf1.derive(enhanced_password.encode())
@@ -245,11 +231,11 @@ def _derive_multilayer_key(password: str) -> bytes:
     )
     intermediate_key2 = kdf2.derive(intermediate_key1[:32])
     
-    # Camada 6: Derivação final com HKDF para maior entropia
+    # Camada 6: Derivação final com HKDF para máxima entropia
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=integrity_key + system_entropy[16:],
+        salt=integrity_key + fixed_entropy[16:],
         info=b"od_aero_final_key_derivation_2024",
     )
     final_key = hkdf.derive(intermediate_key2 + pepper)
