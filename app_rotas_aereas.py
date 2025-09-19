@@ -25,17 +25,86 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import base64
 import logging
 
-# Configurar logging para reduzir mensagens do Streamlit
-logging.getLogger("streamlit").setLevel(logging.CRITICAL)
-logging.getLogger("streamlit.runtime").setLevel(logging.CRITICAL)
-logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.CRITICAL)
-logging.getLogger("streamlit.runtime.caching").setLevel(logging.CRITICAL)
-logging.getLogger("streamlit.caching").setLevel(logging.CRITICAL)
+# Configurar logging detalhado para debug em deploy
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        logging.FileHandler('streamlit_debug.log')  # File output
+    ]
+)
 
-# Configurar variáveis de ambiente para reduzir verbosidade
-os.environ["STREAMLIT_LOGGER_LEVEL"] = "critical"
+# Configurar loggers específicos
+logger = logging.getLogger(__name__)
+streamlit_logger = logging.getLogger("streamlit")
+streamlit_logger.setLevel(logging.DEBUG)
+
+# Log de inicialização
+logger.info("🚀 Iniciando aplicação Streamlit - Sistema de Análise de Rotas Aéreas")
+logger.info(f"📊 Python version: {platform.python_version()}")
+logger.info(f"🖥️ Sistema: {platform.system()} {platform.machine()}")
+
+# Configurar variáveis de ambiente para debug em deploy
+os.environ["STREAMLIT_LOGGER_LEVEL"] = "debug"
 os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
 os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
+
+# Sistema de auto-recovery
+import signal
+import sys
+import time
+from datetime import datetime
+
+class StreamlitAutoRecovery:
+    def __init__(self):
+        self.error_count = 0
+        self.max_errors = 5
+        self.last_error_time = None
+        self.restart_delay = 30  # segundos
+        
+    def handle_error(self, error_type, error_value, traceback):
+        """Handler para erros não capturados"""
+        current_time = datetime.now()
+        
+        logger.error(f"❌ ERRO CRÍTICO DETECTADO: {error_type.__name__}: {error_value}")
+        logger.error(f"📍 Traceback: {traceback}")
+        
+        self.error_count += 1
+        self.last_error_time = current_time
+        
+        # Log detalhado do erro
+        logger.error(f"🔢 Contador de erros: {self.error_count}/{self.max_errors}")
+        logger.error(f"⏰ Timestamp do erro: {current_time}")
+        
+        # Verificar se deve reiniciar
+        if self.error_count >= self.max_errors:
+            logger.critical("🔄 MÁXIMO DE ERROS ATINGIDO - INICIANDO REINICIALIZAÇÃO AUTOMÁTICA")
+            self.restart_application()
+        else:
+            logger.warning(f"⚠️ Erro {self.error_count}/{self.max_errors} - Continuando execução")
+            
+    def restart_application(self):
+        """Reinicia a aplicação automaticamente"""
+        logger.critical("🔄 REINICIANDO APLICAÇÃO EM 30 SEGUNDOS...")
+        time.sleep(self.restart_delay)
+        
+        logger.info("🚀 Reiniciando Streamlit...")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+        
+    def reset_error_count(self):
+        """Reseta contador de erros após período sem erros"""
+        if self.last_error_time:
+            time_since_error = (datetime.now() - self.last_error_time).total_seconds()
+            if time_since_error > 300:  # 5 minutos sem erros
+                self.error_count = 0
+                logger.info("✅ Contador de erros resetado - Sistema estável")
+
+# Instanciar sistema de auto-recovery
+auto_recovery = StreamlitAutoRecovery()
+
+# Configurar handler de erros
+sys.excepthook = auto_recovery.handle_error
 
 # Suprimir mensagens de cache do Streamlit
 import warnings
@@ -82,20 +151,26 @@ def optimize_memory():
 def check_memory_usage():
     """Monitora uso de memória e limpa cache silenciosamente se necessário"""
     if not PSUTIL_AVAILABLE:
+        logger.warning("⚠️ psutil não disponível - monitoramento de memória desabilitado")
         return 0
         
     try:
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
         
+        logger.debug(f"📊 Uso de memória atual: {memory_mb:.1f}MB")
+        
         # Limpar cache silenciosamente se memória > 512MB
         if memory_mb > 512:
+            logger.warning(f"⚠️ Alto uso de memória detectado: {memory_mb:.1f}MB - Limpando cache")
             # Limpar cache do Streamlit quando memória alta (sem aviso)
             st.cache_data.clear()
             optimize_memory()
+            logger.info("✅ Cache limpo e memória otimizada")
             
         return memory_mb
-    except Exception:
+    except Exception as e:
+        logger.error(f"❌ Erro ao verificar uso de memória: {e}")
         return 0
 
 def clear_large_variables(*variables):
@@ -381,30 +456,48 @@ def decrypt_file(encrypted_file_path: str, password: str) -> bytes:
 
 def read_encrypted_parquet(file_path: str, password: str, lazy: bool = True) -> pl.DataFrame:
     """Lê um arquivo parquet criptografado usando sistema de segurança avançado"""
-    # Otimização de memória inicial
-    optimize_memory()
-    
-    # Adicionar extensão .encrypted se não estiver presente
-    if not file_path.endswith('.encrypted'):
-        encrypted_file_path = file_path + '.encrypted'
-    else:
-        encrypted_file_path = file_path
-    
-    # Verificar se o arquivo criptografado existe
-    if not os.path.exists(encrypted_file_path):
-        raise FileNotFoundError(f"Arquivo criptografado não encontrado: {encrypted_file_path}")
-    
-    # Descriptografar arquivo
-    decrypted_data = decrypt_file(encrypted_file_path, password)
-    
-    # Ler dados descriptografados como parquet usando Polars
-    df = pl.read_parquet(io.BytesIO(decrypted_data))
-    
-    # Limpar dados temporários da memória
-    del decrypted_data
-    optimize_memory()
-    
-    return df
+    try:
+        logger.debug(f"🔐 Iniciando leitura de arquivo criptografado: {file_path}")
+        
+        # Otimização de memória inicial
+        optimize_memory()
+        
+        # Adicionar extensão .encrypted se não estiver presente
+        if not file_path.endswith('.encrypted'):
+            encrypted_file_path = file_path + '.encrypted'
+        else:
+            encrypted_file_path = file_path
+        
+        logger.debug(f"📁 Caminho do arquivo: {encrypted_file_path}")
+        
+        # Verificar se o arquivo criptografado existe
+        if not os.path.exists(encrypted_file_path):
+            logger.error(f"❌ Arquivo não encontrado: {encrypted_file_path}")
+            raise FileNotFoundError(f"Arquivo criptografado não encontrado: {encrypted_file_path}")
+        
+        logger.debug(f"✅ Arquivo encontrado, tamanho: {os.path.getsize(encrypted_file_path)} bytes")
+        
+        # Descriptografar arquivo
+        logger.debug("🔓 Iniciando descriptografia...")
+        decrypted_data = decrypt_file(encrypted_file_path, password)
+        logger.debug(f"✅ Descriptografia concluída, dados: {len(decrypted_data)} bytes")
+        
+        # Ler dados descriptografados como parquet usando Polars
+        logger.debug("📊 Convertendo para DataFrame Polars...")
+        df = pl.read_parquet(io.BytesIO(decrypted_data))
+        logger.debug(f"✅ DataFrame criado: {df.height} linhas x {df.width} colunas")
+        
+        # Limpar dados temporários da memória
+        del decrypted_data
+        optimize_memory()
+        
+        logger.debug(f"✅ Arquivo {file_path} carregado com sucesso")
+        return df
+        
+    except Exception as e:
+        logger.error(f"❌ ERRO ao ler arquivo criptografado {file_path}: {str(e)}")
+        logger.error(f"📍 Tipo do erro: {type(e).__name__}")
+        raise
 
 def get_files_password():
     """Obtém a senha dos arquivos do secrets.toml com verificações de segurança"""
@@ -476,32 +569,77 @@ st.markdown("""
 # Otimização de memória inicial
 optimize_memory()
 
+# Sistema de monitoramento de saúde
+def health_check():
+    """Verifica a saúde da aplicação"""
+    try:
+        # Resetar contador de erros se aplicação está estável
+        auto_recovery.reset_error_count()
+        
+        # Verificar memória
+        memory_usage = check_memory_usage()
+        if memory_usage > 1000:  # 1GB
+            logger.warning(f"⚠️ Uso de memória alto: {memory_usage:.1f}MB")
+        
+        # Verificar arquivos críticos
+        critical_files = [
+            "Dados/Entrada/mun_UTPs.csv",
+            "Dados/Entrada/centralidades.csv"
+        ]
+        
+        for file_path in critical_files:
+            if not os.path.exists(file_path):
+                logger.error(f"❌ Arquivo crítico não encontrado: {file_path}")
+                return False
+        
+        logger.debug("✅ Health check passou - Aplicação saudável")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no health check: {e}")
+        return False
+
+# Executar health check inicial
+if not health_check():
+    logger.critical("❌ Health check falhou - Aplicação pode estar instável")
+
 # Verificação de autenticação
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
+    logger.info("🔐 Usuário não autenticado - Exibindo página de login")
     login_page()
     st.stop()
+
+logger.info("✅ Usuário autenticado - Iniciando aplicação principal")
 
 # Aplicativo principal (só executa se autenticado)
 @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
 def load_municipios_data():
     """Carrega dados para análise por municípios com otimização de memória"""
     try:
+        logger.info("🔄 Iniciando carregamento de dados de municípios")
+        
         # Monitorar uso inicial de memória
         initial_memory = check_memory_usage()
+        logger.debug(f"📊 Memória inicial: {initial_memory:.1f}MB")
         
         # Verificar se arquivos criptografados existem
         missing_files = check_data_files()
         if missing_files:
+            logger.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.stop()
         
+        logger.info("✅ Verificação de arquivos concluída")
+        
         # Obter senha dos arquivos
         password = get_files_password()
+        logger.info("✅ Senha dos arquivos obtida com sucesso")
         
         # Dados dos municípios (arquivo CSV não criptografado) - otimizado
+        logger.info("📂 Carregando dados de municípios...")
         dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
             'long_utp': 'long',
             'lat_utp': 'lat'
@@ -509,23 +647,40 @@ def load_municipios_data():
             pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
         ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
         
+        logger.info(f"✅ Dados de municípios carregados: {dados_municipios.height} registros")
+        
         # Forçar limpeza antes de carregar dados grandes
         optimize_memory()
         
         # Dados de rotas de municípios (arquivos parquet criptografados) - carregamento silencioso
+        logger.info("🔐 Carregando dados comerciais criptografados...")
         comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
+        logger.info(f"✅ Dados comerciais carregados: {comerciais.height} registros")
+        
+        logger.info("🔐 Carregando dados executivos criptografados...")
         executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
+        logger.info(f"✅ Dados executivos carregados: {executivos.height} registros")
+        
+        logger.info("🔐 Carregando dados de classificação criptografados...")
         classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
+        logger.info(f"✅ Dados de classificação carregados: {classificacao.height} registros")
+        
+        logger.info("🔐 Carregando dados de aeroportos criptografados...")
         aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        logger.info(f"✅ Dados de aeroportos carregados: {aeroportos.height} registros")
         
         # Verificar uso final de memória
         final_memory = check_memory_usage()
+        memory_used = final_memory - initial_memory
         
-        # Log de uso de memória removido - operação silenciosa
+        logger.info(f"📊 Carregamento concluído - Memória utilizada: {memory_used:.1f}MB")
+        logger.info("✅ Todos os dados de municípios carregados com sucesso")
         
         return dados_municipios, comerciais, executivos, classificacao, aeroportos
         
     except Exception as e:
+        logger.error(f"❌ ERRO CRÍTICO ao carregar dados de municípios: {str(e)}")
+        logger.error(f"📍 Tipo do erro: {type(e).__name__}")
         st.error(f"❌ Erro ao carregar dados de municípios: {str(e)}")
         st.stop()
 
