@@ -2,7 +2,7 @@
 base="light"
 
 [logger]
-level="error"
+level="critical"
 
 [runner]
 fastReruns = true

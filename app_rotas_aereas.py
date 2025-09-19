@@ -26,13 +26,22 @@ import base64
 import logging
 
 # Configurar logging para reduzir mensagens do Streamlit
-logging.getLogger("streamlit").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime").setLevel(logging.ERROR)
-logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
+logging.getLogger("streamlit").setLevel(logging.CRITICAL)
+logging.getLogger("streamlit.runtime").setLevel(logging.CRITICAL)
+logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.CRITICAL)
+logging.getLogger("streamlit.runtime.caching").setLevel(logging.CRITICAL)
+logging.getLogger("streamlit.caching").setLevel(logging.CRITICAL)
 
 # Configurar variáveis de ambiente para reduzir verbosidade
-os.environ["STREAMLIT_LOGGER_LEVEL"] = "error"
+os.environ["STREAMLIT_LOGGER_LEVEL"] = "critical"
 os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
+os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
+
+# Suprimir mensagens de cache do Streamlit
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="streamlit")
+warnings.filterwarnings("ignore", message=".*cache.*")
+warnings.filterwarnings("ignore", message=".*running.*")
 
 # Configurar Streamlit para execução silenciosa
 st.set_page_config(
@@ -41,6 +50,29 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Suprimir mensagens de execução de funções
+import sys
+from contextlib import contextmanager
+
+@contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
+
+# Monkey patch para suprimir mensagens de cache
+original_cache_data = st.cache_data
+def silent_cache_data(*args, **kwargs):
+    # Remover mensagens de execução
+    kwargs['show_spinner'] = False
+    return original_cache_data(*args, **kwargs)
+
+st.cache_data = silent_cache_data
 
 # Configurações de otimização de memória
 def optimize_memory():
