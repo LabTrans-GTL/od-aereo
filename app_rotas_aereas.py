@@ -10,6 +10,12 @@ import os
 import hashlib
 import io
 import platform
+import gc  # Garbage collection
+try:
+    import psutil  # Monitoramento de memória
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 from pathlib import Path
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
@@ -17,6 +23,38 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import base64
+
+# Configurações de otimização de memória
+def optimize_memory():
+    """Otimiza uso de memória e força garbage collection"""
+    gc.collect()  # Força limpeza de memória
+    
+def check_memory_usage():
+    """Monitora uso de memória e alerta se necessário"""
+    if not PSUTIL_AVAILABLE:
+        return 0
+        
+    try:
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        
+        # Alerta se memória > 512MB (ajustado para ambiente de deploy)
+        if memory_mb > 512:
+            st.warning(f"⚠️ Alto uso de memória: {memory_mb:.1f}MB - Limpando cache...")
+            # Limpar cache do Streamlit quando memória alta
+            st.cache_data.clear()
+            optimize_memory()
+            
+        return memory_mb
+    except Exception:
+        return 0
+
+def clear_large_variables(*variables):
+    """Limpa variáveis grandes da memória explicitamente"""
+    for var in variables:
+        if var is not None:
+            del var
+    optimize_memory()
 
 # Funções de autenticação
 def hash_password(password):
@@ -292,8 +330,11 @@ def decrypt_file(encrypted_file_path: str, password: str) -> bytes:
     except Exception as e:
         raise ValueError(f"Falha na descriptografia - chave ou arquivo inválido: {e}")
 
-def read_encrypted_parquet(file_path: str, password: str) -> pl.DataFrame:
+def read_encrypted_parquet(file_path: str, password: str, lazy: bool = True) -> pl.DataFrame:
     """Lê um arquivo parquet criptografado usando sistema de segurança avançado"""
+    # Otimização de memória inicial
+    optimize_memory()
+    
     # Adicionar extensão .encrypted se não estiver presente
     if not file_path.endswith('.encrypted'):
         encrypted_file_path = file_path + '.encrypted'
@@ -308,7 +349,13 @@ def read_encrypted_parquet(file_path: str, password: str) -> pl.DataFrame:
     decrypted_data = decrypt_file(encrypted_file_path, password)
     
     # Ler dados descriptografados como parquet usando Polars
-    return pl.read_parquet(io.BytesIO(decrypted_data))
+    df = pl.read_parquet(io.BytesIO(decrypted_data))
+    
+    # Limpar dados temporários da memória
+    del decrypted_data
+    optimize_memory()
+    
+    return df
 
 def get_files_password():
     """Obtém a senha dos arquivos do secrets.toml com verificações de segurança"""
@@ -355,288 +402,30 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# CSS customizado para design profissional
+# CSS otimizado (mínimo necessário)
 st.markdown("""
 <style>
-    /* Fonte e cores profissionais */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    
-    * {
-        font-family: 'Inter', sans-serif;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+    * { font-family: 'Inter', sans-serif; }
+    .main-header { 
+        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%); 
+        padding: 2rem; border-radius: 15px; color: white; margin-bottom: 2rem; 
     }
-    
-    /* Cabeçalho elegante */
-    .main-header {
-        background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        color: white;
-        margin-bottom: 2rem;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+    .metric-container { 
+        background: #f8f9fa; padding: 1.5rem; border-radius: 12px; 
+        text-align: center; margin: 0.5rem; 
     }
-    
-    .main-header h1 {
-        margin: 0;
-        font-weight: 600;
-        font-size: 2.5rem;
-    }
-    
-    .main-header p {
-        margin: 0.5rem 0 0 0;
-        opacity: 0.9;
-        font-size: 1.1rem;
-    }
-    
-    /* Cartões de informação */
-    .info-card {
-        background: white;
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 5px 20px rgba(0,0,0,0.08);
-        margin-bottom: 1rem;
-        border-left: 4px solid #2a5298;
-    }
-    
-    .metric-container {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 12px;
-        text-align: center;
-        margin: 0.5rem;
-        transition: transform 0.2s;
-    }
-    
-    .metric-container:hover {
-        transform: translateY(-5px);
-        box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-    }
-    
-    .metric-value {
-        font-size: 2rem;
-        font-weight: 700;
-        color: #1e3c72;
-        margin: 0;
-    }
-    
-    .metric-label {
-        font-size: 0.9rem;
-        color: #6c757d;
-        margin: 0;
-        font-weight: 500;
-    }
-    
-    /* Seleções estilizadas */
-    .stSelectbox > div > div {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        border: 2px solid #e9ecef;
-    }
-    
-    .stSelectbox > label {
-        font-weight: 500;
-        color: #495057;
-    }
-    
-    /* Fix para texto da selectbox */
-    .stSelectbox .st-emotion-cache-1y4p8pa {
-        overflow: visible !important;
-    }
-    
-    .stSelectbox input {
-        color: #495057 !important;
-        background-color: transparent !important;
-    }
-    
-    /* Melhorar comportamento do selectbox */
-    .stSelectbox div[data-baseweb="select"] {
-        background-color: #f8f9fa !important;
-    }
-    
-    .stSelectbox div[data-baseweb="select"]:focus-within {
-        border-color: #2a5298 !important;
-        box-shadow: 0 0 0 2px rgba(42, 82, 152, 0.1) !important;
-    }
-    
-    /* Botões estilizados */
-    .stButton > button {
-        background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%);
-        color: #fff !important;
-        border: none;
-        padding: 0.75rem 2rem;
-        border-radius: 8px;
-        font-weight: 500;
-        transition: all 0.3s;
-    }
-    
-    .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 5px 20px rgba(42,82,152,0.3);
-    }
-    
-    /* Sidebar estilizada */
-    .css-1d391kg {
-        background-color: #f8f9fa;
-    }
-    
-    /* Remover espaços desnecessários */
-    .block-container {
-        padding-top: 2rem;
-    }
-    
-    /* Estilo para labels de trajeto */
-    .route-label {
-        background: #e3f2fd;
-        padding: 0.5rem 1rem;
-        border-radius: 20px;
-        font-size: 0.9rem;
-        font-weight: 500;
-        color: #1565c0;
-        display: inline-block;
-        margin: 0.25rem;
-    }
-    
-    /* Mensagem inicial elegante */
-    .info-message {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: center;
-        height: 400px;
-        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-        border-radius: 15px;
-        padding: 2rem;
-        text-align: center;
-    }
-    
-    .info-message h3 {
-        color: #1e3c72;
-        margin-bottom: 1rem;
-        font-size: 1.5rem;
-    }
-    
-    .info-message p {
-        color: #6c757d;
-        font-size: 1.1rem;
-        max-width: 600px;
-    }
-    
-    /* Aviões estáticos - sem animação */
-    
-    /* Melhorias no selectbox - sem transições problemáticas */
-    .stSelectbox > div > div {
-        position: relative;
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        border: 2px solid #e9ecef;
-    }
-    
-    .stSelectbox > div > div:hover {
-        border-color: #2a5298;
-        box-shadow: 0 2px 8px rgba(42, 82, 152, 0.1);
-    }
-    
-    /* Tooltip customizado */
-    .leaflet-tooltip {
-        background: rgba(30, 60, 114, 0.9);
-        color: white;
-        border: none;
-        border-radius: 6px;
-        padding: 8px 12px;
-        font-size: 14px;
-        font-weight: 500;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-    }
-    
-    .leaflet-tooltip::before {
-        border-top-color: rgba(30, 60, 114, 0.9);
-    }
-    
-    /* Popup customizado */
-    .leaflet-popup-content-wrapper {
-        background: white;
-        border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-        padding: 0;
-    }
-    
-    .leaflet-popup-content {
-        margin: 0;
-        padding: 16px;
-        font-size: 14px;
-        line-height: 1.6;
-    }
-    
-    .leaflet-popup-content b {
-        color: #1e3c72;
-        font-size: 16px;
-        display: block;
-        margin-bottom: 8px;
-    }
-    
-    /* Animação de entrada suave */
-    @keyframes fadeInUp {
-        from {
-            opacity: 0;
-            transform: translateY(20px);
-        }
-        to {
-            opacity: 1;
-            transform: translateY(0);
-        }
-    }
-    
-    .main > div {
-        animation: fadeInUp 0.6s ease-out;
-    }
-    
-    /* Animações suaves para interface */
-    
-    /* Efeito de entrada suave para elementos do mapa */
-    @keyframes map-element-enter {
-        from {
-            opacity: 0;
-            transform: scale(0.8);
-        }
-        to {
-            opacity: 1;
-            transform: scale(1);
-        }
-    }
-    
-    /* Hover suave para elementos interativos */
-    .leaflet-marker-icon:hover {
-        transform: scale(1.1);
-        transition: transform 0.2s ease;
-    }
-    
-    /* Interface limpa para selectboxes */
-    .stSelectbox > div > div {
-        border-radius: 8px;
-        border: 1px solid #ddd;
-        transition: border-color 0.2s ease;
-    }
-    
-    .stSelectbox > div > div:focus-within {
-        border-color: #1e3c72;
-        box-shadow: 0 0 0 2px rgba(30, 60, 114, 0.1);
-    }
-    
-    /* Estilo limpo para botões */
-    .stButton > button[kind="secondary"] {
-        border-radius: 8px;
-        border: 1px solid #ddd;
-        background-color: #f8f9fa;
-        color: #495057;
-        transition: all 0.2s ease;
-    }
-    
-    .stButton > button[kind="secondary"]:hover {
-        background-color: #e9ecef;
-        border-color: #1e3c72;
+    .metric-value { font-size: 2rem; font-weight: 700; color: #1e3c72; margin: 0; }
+    .stButton > button { 
+        background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%); 
+        color: #fff !important; border: none; padding: 0.75rem 2rem; 
+        border-radius: 8px; font-weight: 500; 
     }
 </style>
-
 """, unsafe_allow_html=True)
+
+# Otimização de memória inicial
+optimize_memory()
 
 # Verificação de autenticação
 if 'authenticated' not in st.session_state:
@@ -647,10 +436,13 @@ if not st.session_state.authenticated:
     st.stop()
 
 # Aplicativo principal (só executa se autenticado)
-@st.cache_data
+@st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
 def load_municipios_data():
-    """Carrega dados para análise por municípios"""
+    """Carrega dados para análise por municípios com otimização de memória"""
     try:
+        # Monitorar uso inicial de memória
+        initial_memory = check_memory_usage()
+        
         # Verificar se arquivos criptografados existem
         missing_files = check_data_files()
         if missing_files:
@@ -660,7 +452,7 @@ def load_municipios_data():
         # Obter senha dos arquivos
         password = get_files_password()
         
-        # Dados dos municípios (arquivo CSV não criptografado)
+        # Dados dos municípios (arquivo CSV não criptografado) - otimizado
         dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
             'long_utp': 'long',
             'lat_utp': 'lat'
@@ -668,11 +460,28 @@ def load_municipios_data():
             pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
         ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
         
-        # Dados de rotas de municípios (arquivos parquet criptografados)
-        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
-        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
-        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
-        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        # Forçar limpeza antes de carregar dados grandes
+        optimize_memory()
+        
+        # Dados de rotas de municípios (arquivos parquet criptografados) - com otimização
+        with st.spinner("Carregando dados comerciais..."):
+            comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
+            
+        with st.spinner("Carregando dados executivos..."):
+            executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
+            
+        with st.spinner("Carregando classificações..."):
+            classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
+            
+        with st.spinner("Carregando aeroportos..."):
+            aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        
+        # Verificar uso final de memória
+        final_memory = check_memory_usage()
+        
+        # Log de uso de memória (apenas em desenvolvimento)
+        if st.secrets.get("DEBUG_MODE", False):
+            st.info(f"📊 Memória carregada: {final_memory - initial_memory:.1f}MB")
         
         return dados_municipios, comerciais, executivos, classificacao, aeroportos
         
@@ -680,7 +489,7 @@ def load_municipios_data():
         st.error(f"❌ Erro ao carregar dados de municípios: {str(e)}")
         st.stop()
 
-@st.cache_data 
+@st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
 def load_utp_data():
     """Carrega dados para análise por UTPs"""
     try:
@@ -711,7 +520,7 @@ def load_utp_data():
         st.error(f"❌ Erro ao carregar dados de UTPs: {str(e)}")
         st.stop()
 
-@st.cache_data
+@st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
 def load_centralidade_data():
     """Carrega dados para análise por centralidades"""
     try:
@@ -748,7 +557,7 @@ def load_centralidade_data():
         st.stop()
 
 # Cache para lookups de coordenadas
-@st.cache_data
+@st.cache_data(ttl=7200, max_entries=5)  # Cache por 2 horas, máximo 5 entradas
 def create_coordinate_maps(dados_municipios, aeroportos):
     # Criar dicionários para lookup rápido de coordenadas
     mun_coords = {}
@@ -967,7 +776,7 @@ if pagina_atual == "municipios":
     dados_municipios, comerciais, executivos, classificacao, aeroportos = load_municipios_data()
     
     # Criar dicionários de mapeamento código -> nome com UF para municípios
-    @st.cache_data
+    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
     def create_municipio_mappings(comerciais, executivos, dados_municipios):
         mun_map = {}
         uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
@@ -1006,7 +815,7 @@ elif pagina_atual == "utps":
     dados_utps, utp_info, comerciais, executivos, classificacao, aeroportos = load_utp_data()
     
     # Criar dicionários de mapeamento UTP
-    @st.cache_data
+    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
     def create_utp_mappings(comerciais, executivos, dados_utps):
         utp_map = {}
         
@@ -1031,7 +840,7 @@ elif pagina_atual == "utps":
     item_map = create_utp_mappings(comerciais, executivos, dados_utps)
     
     # Para UTPs, usar coordenadas dos municípios sede
-    @st.cache_data 
+    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
     def create_utp_coordinate_maps(dados_utps, aeroportos):
         utp_coords = {}
         
@@ -1051,7 +860,7 @@ else:  # centralidades
     dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos = load_centralidade_data()
     
     # Criar dicionários de mapeamento código -> nome com UF para centralidades
-    @st.cache_data
+    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
     def create_centralidade_mappings(comerciais, executivos, dados_municipios):
         mun_map = {}
         uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
@@ -1087,7 +896,7 @@ else:  # centralidades
     mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
 
 # Criar opções pesquisáveis
-@st.cache_data
+@st.cache_data(ttl=3600, max_entries=5)  # Cache por 1 hora, máximo 5 entradas
 def get_unique_origins_by_page(comerciais, executivos, pagina):
     if pagina == "utps":
         origins_comerciais = set(comerciais['UTP_origem'].unique().to_list())
@@ -2095,6 +1904,9 @@ if origem_selecionada and destino_selecionado:
         
 else:
     # Dashboard inicial com informações ricas
+    # Monitoramento periódico de memória
+    current_memory = check_memory_usage()
+    
     if pagina_atual == "municipios":
         st.markdown("### 📈 Panorama Geral - Análise por Municípios")
         titulo_total = "Total de Municípios"
@@ -2176,3 +1988,6 @@ else:
                     st.metric("Total de Viagens", format_number_br(int(total_viagens)))
                 else:
                     st.metric("Rotas Totais", format_number_br(comerciais.height + executivos.height))
+
+# Limpeza final de memória para otimização contínua
+optimize_memory()
