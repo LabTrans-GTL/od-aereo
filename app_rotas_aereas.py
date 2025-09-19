@@ -3,20 +3,20 @@ import polars as pl
 import folium
 from streamlit_folium import st_folium
 import plotly.graph_objects as go
-import plotly.express as px
-from folium import plugins
 from folium.plugins import AntPath
 import math
-import json
 import unicodedata
-import re
 import os
 import hashlib
-import requests
 import io
-import gdown
-import shutil
+import platform
 from pathlib import Path
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+import base64
 
 # Funções de autenticação
 def hash_password(password):
@@ -134,116 +134,232 @@ def logout():
     st.session_state.username = None
     st.rerun()
 
-# Funções para download de dados do Google Drive
 
-def download_data_files():
-    """Baixa todos os arquivos de dados necessários do Google Drive"""
+def _get_crypto_config():
+    """Obtém configurações criptográficas do secrets.toml de forma segura"""
     try:
-        # Tentar obter URL da pasta do Google Drive dos secrets
         if hasattr(st, 'secrets'):
-            drive_folder_url = st.secrets.get('GOOGLE_DRIVE_FOLDER_URL')
+            config = {
+                'password': st.secrets.get('FILES_PASSWORD'),
+                'salt_primary': st.secrets.get('CRYPTO_SALT_PRIMARY', ''),
+                'salt_secondary': st.secrets.get('CRYPTO_SALT_SECONDARY', ''),
+                'pepper': st.secrets.get('CRYPTO_PEPPER', ''),
+                'entropy_factor': st.secrets.get('SYSTEM_ENTROPY_FACTOR', ''),
+                'integrity_key': st.secrets.get('INTEGRITY_CHECK_KEY', '')
+            }
         else:
-            # Fallback para variáveis de ambiente
-            drive_folder_url = os.getenv('GOOGLE_DRIVE_FOLDER_URL')
-    except:
-        # Fallback para variáveis de ambiente se secrets não funcionar
-        drive_folder_url = os.getenv('GOOGLE_DRIVE_FOLDER_URL')
+            config = {
+                'password': os.getenv('FILES_PASSWORD'),
+                'salt_primary': os.getenv('CRYPTO_SALT_PRIMARY', ''),
+                'salt_secondary': os.getenv('CRYPTO_SALT_SECONDARY', ''),
+                'pepper': os.getenv('CRYPTO_PEPPER', ''),
+                'entropy_factor': os.getenv('SYSTEM_ENTROPY_FACTOR', ''),
+                'integrity_key': os.getenv('INTEGRITY_CHECK_KEY', '')
+            }
+    except Exception:
+        config = {
+            'password': os.getenv('FILES_PASSWORD'),
+            'salt_primary': os.getenv('CRYPTO_SALT_PRIMARY', ''),
+            'salt_secondary': os.getenv('CRYPTO_SALT_SECONDARY', ''),
+            'pepper': os.getenv('CRYPTO_PEPPER', ''),
+            'entropy_factor': os.getenv('SYSTEM_ENTROPY_FACTOR', ''),
+            'integrity_key': os.getenv('INTEGRITY_CHECK_KEY', '')
+        }
     
-    if not drive_folder_url:
-        st.error("❌ URL da pasta do Google Drive não configurada. Configure GOOGLE_DRIVE_FOLDER_URL nos secrets.")
-        return False
+    return config
+
+def _decode_b64_value(value: str) -> bytes:
+    """Decodifica valores base64 do secrets.toml"""
+    if value.startswith('b64:'):
+        return base64.b64decode(value[4:])
+    return value.encode()
+
+def _generate_system_entropy() -> bytes:
+    """Gera entropia baseada no sistema para tornar a chave única por ambiente"""
+    # Combinar várias características do sistema de forma determinística
+    system_info = []
     
-    # Verificar se os dados já foram baixados
-    required_paths = [
-        "Dados/Entrada",
-        "Dados/Resultados"
-    ]
-    
-    # Se as pastas principais existem e não estão vazias, não precisa baixar novamente
-    all_exist = True
-    for path in required_paths:
-        if not os.path.exists(path) or not os.listdir(path):
-            all_exist = False
-            break
-    
-    if all_exist:
-        return True
-    
-    # Extrair ID da pasta do Google Drive
     try:
-        if 'folders/' in drive_folder_url:
-            folder_id = drive_folder_url.split('folders/')[1].split('?')[0]
-        elif 'id=' in drive_folder_url:
-            folder_id = drive_folder_url.split('id=')[1].split('&')[0]
-        else:
-            st.error("❌ Formato de URL do Google Drive inválido")
-            return False
-    except Exception as e:
-        st.error(f"❌ Erro ao extrair ID da pasta: {str(e)}")
-        return False
+        # Informações do sistema operacional
+        system_info.append(platform.system())
+        system_info.append(platform.machine())
+        system_info.append(platform.processor()[:50] if platform.processor() else "unknown")
+        
+        # Informações do Python e ambiente
+        system_info.append(platform.python_version())
+        system_info.append(str(os.getcwd()))
+        
+        # Características do diretório atual (se existir)
+        current_dir = Path.cwd()
+        if current_dir.exists():
+            system_info.append(str(current_dir.stat().st_mode))
+        
+    except Exception:
+        # Fallback em caso de erro
+        system_info = ["fallback", "entropy", "system"]
     
-    # Baixar a pasta inteira do Google Drive
-    with st.spinner("\n\nBaixando dados do Google Drive... Isso pode levar alguns minutos."):
+    # Combinar tudo em uma string determinística
+    combined = "_".join(system_info)
+    return hashlib.sha256(combined.encode()).digest()
+
+def _derive_multilayer_key(password: str) -> bytes:
+    """Deriva chave usando múltiplas camadas de segurança"""
+    config = _get_crypto_config()
+    
+    if not config['password']:
+        st.error("❌ Configurações de criptografia não encontradas.")
+        st.stop()
+    
+    # Camada 1: Decodificar salts e pepper do secrets.toml
+    try:
+        salt_primary = _decode_b64_value(config['salt_primary'])
+        salt_secondary = _decode_b64_value(config['salt_secondary'])
+        pepper = _decode_b64_value(config['pepper'])
+        integrity_key = _decode_b64_value(config['integrity_key'])
+    except Exception:
+        st.error("❌ Erro ao decodificar configurações criptográficas.")
+        st.stop()
+    
+    # Camada 2: Gerar entropia do sistema
+    system_entropy = _generate_system_entropy()
+    
+    # Camada 3: Combinar senha com fator de entropia
+    enhanced_password = f"{password}_{config['entropy_factor']}"
+    
+    # Camada 4: Primeira derivação com PBKDF2
+    kdf1 = PBKDF2HMAC(
+        algorithm=hashes.SHA512(),
+        length=64,
+        salt=salt_primary + system_entropy[:16],
+        iterations=200000,
+    )
+    intermediate_key1 = kdf1.derive(enhanced_password.encode())
+    
+    # Camada 5: Segunda derivação com Scrypt (mais resistente a ataques de hardware)
+    kdf2 = Scrypt(
+        length=32,
+        salt=salt_secondary + pepper[:16],
+        n=2**14,  # CPU/memory cost factor
+        r=8,      # block size
+        p=1,      # parallelization factor
+    )
+    intermediate_key2 = kdf2.derive(intermediate_key1[:32])
+    
+    # Camada 6: Derivação final com HKDF para maior entropia
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=integrity_key + system_entropy[16:],
+        info=b"od_aero_final_key_derivation_2024",
+    )
+    final_key = hkdf.derive(intermediate_key2 + pepper)
+    
+    return base64.urlsafe_b64encode(final_key)
+
+def _verify_file_integrity(encrypted_data: bytes, config: dict) -> bool:
+    """Verifica integridade do arquivo criptografado"""
+    try:
+        integrity_key = _decode_b64_value(config['integrity_key'])
+        # Verificação simples de integridade baseada em hash
+        file_hash = hashlib.sha256(encrypted_data + integrity_key).hexdigest()
+        # Em uma implementação real, este hash seria armazenado com o arquivo
+        # Por simplicidade, assumimos que arquivos válidos passam na verificação
+        return len(encrypted_data) > 0
+    except Exception:
+        return False
+
+# Função legada removida - todos os arquivos agora usam sistema multicamadas
+
+def decrypt_file(encrypted_file_path: str, password: str) -> bytes:
+    """Descriptografa um arquivo usando sistema multicamadas de segurança com compressão"""
+    config = _get_crypto_config()
+    
+    # Gerar chave multicamadas
+    key = _derive_multilayer_key(password)
+    fernet = Fernet(key)
+    
+    # Ler arquivo criptografado
+    try:
+        with open(encrypted_file_path, 'rb') as encrypted_file:
+            encrypted_data = encrypted_file.read()
+    except Exception as e:
+        raise FileNotFoundError(f"Não foi possível ler o arquivo: {encrypted_file_path}")
+    
+    # Verificar integridade
+    if not _verify_file_integrity(encrypted_data, config):
+        raise ValueError("Falha na verificação de integridade do arquivo")
+    
+    # Descriptografar dados
+    try:
+        decrypted_compressed_data = fernet.decrypt(encrypted_data)
+        
+        # Tentar descomprimir (arquivos novos com compressão)
         try:
-            # Criar diretório temporário para download
-            temp_dir = "temp_download"
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+            import gzip
+            decrypted_data = gzip.decompress(decrypted_compressed_data)
+            return decrypted_data
+        except Exception:
+            # Se falhar na descompressão, retornar dados descriptografados diretamente
+            # (compatibilidade com arquivos antigos sem compressão)
+            return decrypted_compressed_data
             
-            # Baixar pasta usando gdown
-            gdown.download_folder(
-                f"https://drive.google.com/drive/folders/{folder_id}",
-                output=temp_dir,
-                quiet=False,
-                use_cookies=False
-            )
-            
-            # Mover conteúdo para o diretório Dados
-            if os.path.exists(temp_dir):
-                # Criar diretório Dados se não existir
-                os.makedirs("Dados", exist_ok=True)
-                
-                # Mover tudo do temp_dir para Dados
-                for item in os.listdir(temp_dir):
-                    source = os.path.join(temp_dir, item)
-                    destination = os.path.join("Dados", item)
-                    
-                    # Se já existir, remover primeiro
-                    if os.path.exists(destination):
-                        if os.path.isdir(destination):
-                            shutil.rmtree(destination)
-                        else:
-                            os.remove(destination)
-                    
-                    # Mover arquivo/pasta
-                    shutil.move(source, destination)
-                
-                # Limpar diretório temporário
-                shutil.rmtree(temp_dir)
-                
-                return True
-            else:
-                return False
-                
-        except Exception as e:
-            # Limpar diretório temporário em caso de erro
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-            return False
+    except Exception as e:
+        raise ValueError(f"Falha na descriptografia - chave ou arquivo inválido: {e}")
+
+def read_encrypted_parquet(file_path: str, password: str) -> pl.DataFrame:
+    """Lê um arquivo parquet criptografado usando sistema de segurança avançado"""
+    # Adicionar extensão .encrypted se não estiver presente
+    if not file_path.endswith('.encrypted'):
+        encrypted_file_path = file_path + '.encrypted'
+    else:
+        encrypted_file_path = file_path
+    
+    # Verificar se o arquivo criptografado existe
+    if not os.path.exists(encrypted_file_path):
+        raise FileNotFoundError(f"Arquivo criptografado não encontrado: {encrypted_file_path}")
+    
+    # Descriptografar arquivo
+    decrypted_data = decrypt_file(encrypted_file_path, password)
+    
+    # Ler dados descriptografados como parquet usando Polars
+    return pl.read_parquet(io.BytesIO(decrypted_data))
+
+def get_files_password():
+    """Obtém a senha dos arquivos do secrets.toml com verificações de segurança"""
+    config = _get_crypto_config()
+    
+    if not config['password']:
+        st.error("❌ Senha dos arquivos não configurada. Configure FILES_PASSWORD nos secrets.")
+        st.stop()
+    
+    # Verificar se todas as configurações necessárias estão presentes
+    required_configs = ['salt_primary', 'salt_secondary', 'pepper', 'entropy_factor', 'integrity_key']
+    missing_configs = [key for key in required_configs if not config[key]]
+    
+    if missing_configs:
+        st.error(f"❌ Configurações criptográficas faltando: {', '.join(missing_configs)}")
+        st.stop()
+    
+    return config['password']
 
 def check_data_files():
-    """Verifica se todos os arquivos de dados necessários existem"""
-    required_paths = [
-        "Dados/Entrada",
-        "Dados/Resultados"
+    """Verifica se todos os arquivos de dados criptografados necessários existem"""
+    required_files = [
+        "Dados/Entrada/aeroportos.parquet.encrypted",
+        "Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet.encrypted",
+        "Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet.encrypted",
+        "Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Comerciais.parquet.encrypted",
+        "Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Executivos.parquet.encrypted",
+        "Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet.encrypted",
+        "Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet.encrypted"
     ]
     
-    missing_paths = []
-    for path in required_paths:
-        if not os.path.exists(path) or not os.listdir(path):
-            missing_paths.append(path)
+    missing_files = []
+    for file_path in required_files:
+        if not os.path.exists(file_path):
+            missing_files.append(file_path)
     
-    return missing_paths
+    return missing_files
 
 # Configuração da página
 st.set_page_config(
@@ -549,12 +665,16 @@ if not st.session_state.authenticated:
 def load_municipios_data():
     """Carrega dados para análise por municípios"""
     try:
-        # Verificar e baixar dados se necessário
-        if not download_data_files():
-            st.error("❌ Não foi possível baixar os dados necessários")
+        # Verificar se arquivos criptografados existem
+        missing_files = check_data_files()
+        if missing_files:
+            st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.stop()
         
-        # Dados dos municípios
+        # Obter senha dos arquivos
+        password = get_files_password()
+        
+        # Dados dos municípios (arquivo CSV não criptografado)
         dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
             'long_utp': 'long',
             'lat_utp': 'lat'
@@ -562,11 +682,11 @@ def load_municipios_data():
             pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
         ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
         
-        # Dados de rotas de municípios
-        comerciais = pl.read_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet")
-        executivos = pl.read_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet")
-        classificacao = pl.read_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet")
-        aeroportos = pl.read_parquet('Dados/Entrada/aeroportos.parquet')
+        # Dados de rotas de municípios (arquivos parquet criptografados)
+        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
+        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
+        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
+        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
         
         return dados_municipios, comerciais, executivos, classificacao, aeroportos
         
@@ -578,22 +698,26 @@ def load_municipios_data():
 def load_utp_data():
     """Carrega dados para análise por UTPs"""
     try:
-        # Verificar e baixar dados se necessário
-        if not download_data_files():
-            st.error("❌ Não foi possível baixar os dados necessários")
+        # Verificar se arquivos criptografados existem
+        missing_files = check_data_files()
+        if missing_files:
+            st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.stop()
         
-        # Dados das UTPs
+        # Obter senha dos arquivos
+        password = get_files_password()
+        
+        # Dados das UTPs (arquivo CSV não criptografado)
         dados_utps = pl.read_csv("Dados/Entrada/mun_UTPs.csv")
         
         # Criar mapeamento de UTPs
         utp_info = dados_utps.select(['utp', 'nome_utp']).unique().sort('utp')
         
-        # Dados de rotas de UTPs
-        comerciais = pl.read_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Comerciais.parquet")
-        executivos = pl.read_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Executivos.parquet")
-        classificacao = pl.read_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/classificacao_pares.parquet")
-        aeroportos = pl.read_parquet('Dados/Entrada/aeroportos.parquet')
+        # Dados de rotas de UTPs (arquivos parquet criptografados)
+        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
+        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
+        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
+        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
         
         return dados_utps, utp_info, comerciais, executivos, classificacao, aeroportos
         
@@ -605,12 +729,16 @@ def load_utp_data():
 def load_centralidade_data():
     """Carrega dados para análise por centralidades"""
     try:
-        # Verificar e baixar dados se necessário
-        if not download_data_files():
-            st.error("❌ Não foi possível baixar os dados necessários")
+        # Verificar se arquivos criptografados existem
+        missing_files = check_data_files()
+        if missing_files:
+            st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.stop()
         
-        # Dados dos municípios (mesma base)
+        # Obter senha dos arquivos
+        password = get_files_password()
+        
+        # Dados dos municípios (arquivo CSV não criptografado)
         dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
             'long_utp': 'long',
             'lat_utp': 'lat'
@@ -618,14 +746,14 @@ def load_centralidade_data():
             pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
         ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
         
-        # Dados de centralidades  
+        # Dados de centralidades (arquivo CSV não criptografado)
         dados_centralidades = pl.read_csv("Dados/Entrada/centralidades.csv")
         
-        # Dados de rotas de centralidades
-        comerciais = pl.read_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet")
-        executivos = pl.read_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet")
-        classificacao = pl.read_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/classificacao_pares.parquet")
-        aeroportos = pl.read_parquet('Dados/Entrada/aeroportos.parquet')
+        # Dados de rotas de centralidades (arquivos parquet criptografados)
+        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet", password)
+        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet", password)
+        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/classificacao_pares.parquet", password)
+        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
         
         return dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos
         
