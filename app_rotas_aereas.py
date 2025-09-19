@@ -23,6 +23,24 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 import base64
+import logging
+
+# Configurar logging para reduzir mensagens do Streamlit
+logging.getLogger("streamlit").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime").setLevel(logging.ERROR)
+logging.getLogger("streamlit.runtime.scriptrunner").setLevel(logging.ERROR)
+
+# Configurar variáveis de ambiente para reduzir verbosidade
+os.environ["STREAMLIT_LOGGER_LEVEL"] = "error"
+os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
+
+# Configurar Streamlit para execução silenciosa
+st.set_page_config(
+    page_title="Análise de Rotas Aéreas",
+    page_icon="✈️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Configurações de otimização de memória
 def optimize_memory():

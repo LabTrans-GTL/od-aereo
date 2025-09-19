@@ -1,2 +1,20 @@
 [theme]
 base="light"
+
+[logger]
+level="error"
+
+[runner]
+fastReruns = true
+enforceSerializableSessionState = false
+
+[client]
+showErrorDetails = false
+
+[server]
+headless = true
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
