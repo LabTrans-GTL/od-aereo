@@ -47,7 +47,7 @@ logger.info(f"🖥️ Sistema: {platform.system()} {platform.machine()}")
 
 # Configurar variáveis de ambiente para debug em deploy
 os.environ["STREAMLIT_LOGGER_LEVEL"] = "debug"
-os.environ["STREAMLIT_SERVER_HEADLESS"] = "true"
+os.environ["STREAMLIT_SERVER_HEADLESS"] = "false"
 os.environ["STREAMLIT_BROWSER_GATHER_USAGE_STATS"] = "false"
 
 # Sistema de auto-recovery
@@ -173,12 +173,97 @@ def check_memory_usage():
         logger.error(f"❌ Erro ao verificar uso de memória: {e}")
         return 0
 
+def clear_all_caches():
+    """Limpa todos os caches do Streamlit para liberar memória"""
+    try:
+        logger.info("🧹 Limpando todos os caches...")
+        st.cache_data.clear()
+        optimize_memory()
+        logger.info("✅ Todos os caches foram limpos")
+    except Exception as e:
+        logger.error(f"❌ Erro ao limpar caches: {e}")
+
+def safe_clear_cache():
+    """Limpa cache de forma segura com tratamento de erros"""
+    try:
+        clear_all_caches()
+        return True
+    except Exception as e:
+        logger.error(f"❌ Erro ao limpar cache: {e}")
+        return False
+
 def clear_large_variables(*variables):
     """Limpa variáveis grandes da memória explicitamente"""
     for var in variables:
         if var is not None:
             del var
     optimize_memory()
+
+def load_large_csv_safely(file_path: str, max_size_mb: int = 100) -> pl.DataFrame:
+    """Carrega arquivos CSV grandes de forma segura com otimizações de memória"""
+    try:
+        # Verificar tamanho do arquivo
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
+        
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        logger.info(f"📊 Carregando arquivo: {file_path} ({file_size_mb:.1f}MB)")
+        
+        # Se arquivo muito grande, usar estratégias de otimização
+        if file_size_mb > max_size_mb:
+            logger.warning(f"⚠️ Arquivo muito grande ({file_size_mb:.1f}MB) - Aplicando otimizações")
+            
+            # Estratégia 1: Carregar com streaming
+            try:
+                logger.info("🔄 Tentativa 1: Carregamento com streaming...")
+                df = pl.scan_csv(file_path).collect()
+                logger.info(f"✅ Carregamento com streaming bem-sucedido: {df.height} registros")
+                return df
+            except Exception as e:
+                logger.warning(f"⚠️ Streaming falhou: {e}")
+                
+                # Estratégia 2: Carregar em chunks
+                try:
+                    logger.info("🔄 Tentativa 2: Carregamento em chunks...")
+                    chunk_size = 10000  # 10k linhas por vez
+                    chunks = []
+                    
+                    # Ler arquivo em pedaços
+                    for i, chunk in enumerate(pl.read_csv(file_path, n_rows=chunk_size, skip_rows_after_header=i*chunk_size)):
+                        if chunk.height == 0:
+                            break
+                        chunks.append(chunk)
+                        logger.debug(f"📦 Chunk {i+1} carregado: {chunk.height} registros")
+                        
+                        # Limpar memória a cada 5 chunks
+                        if (i + 1) % 5 == 0:
+                            optimize_memory()
+                    
+                    # Combinar chunks
+                    if chunks:
+                        df = pl.concat(chunks)
+                        logger.info(f"✅ Carregamento em chunks bem-sucedido: {df.height} registros")
+                        return df
+                    else:
+                        raise ValueError("Nenhum chunk foi carregado")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Carregamento em chunks falhou: {e}")
+                    
+                    # Estratégia 3: Carregamento normal (último recurso)
+                    logger.info("🔄 Tentativa 3: Carregamento normal (último recurso)...")
+                    df = pl.read_csv(file_path)
+                    logger.info(f"✅ Carregamento normal bem-sucedido: {df.height} registros")
+                    return df
+        else:
+            # Arquivo pequeno, carregamento normal
+            df = pl.read_csv(file_path)
+            logger.info(f"✅ Carregamento normal bem-sucedido: {df.height} registros")
+            return df
+            
+    except Exception as e:
+        logger.error(f"❌ ERRO ao carregar arquivo {file_path}: {str(e)}")
+        raise
 
 # Funções de autenticação
 def hash_password(password):
@@ -715,20 +800,29 @@ def load_utp_data():
         st.error(f"❌ Erro ao carregar dados de UTPs: {str(e)}")
         st.stop()
 
-@st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
+@st.cache_data(ttl=7200, max_entries=2)  # Cache por 2 horas, máximo 2 entradas para economizar memória
 def load_centralidade_data():
-    """Carrega dados para análise por centralidades"""
+    """Carrega dados para análise por centralidades com otimizações de memória"""
     try:
+        logger.info("🔄 Iniciando carregamento de dados de centralidades")
+        
+        # Monitorar uso inicial de memória
+        initial_memory = check_memory_usage()
+        logger.debug(f"📊 Memória inicial: {initial_memory:.1f}MB")
+        
         # Verificar se arquivos criptografados existem
         missing_files = check_data_files()
         if missing_files:
+            logger.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
             st.stop()
         
         # Obter senha dos arquivos
         password = get_files_password()
+        logger.info("✅ Senha dos arquivos obtida com sucesso")
         
-        # Dados dos municípios (arquivo CSV não criptografado)
+        # Dados dos municípios (arquivo CSV não criptografado) - otimizado
+        logger.info("📂 Carregando dados de municípios...")
         dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
             'long_utp': 'long',
             'lat_utp': 'lat'
@@ -736,19 +830,129 @@ def load_centralidade_data():
             pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
         ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
         
-        # Dados de centralidades (arquivo CSV não criptografado)
-        dados_centralidades = pl.read_csv("Dados/Entrada/centralidades.csv")
+        logger.info(f"✅ Dados de municípios carregados: {dados_municipios.height} registros")
         
-        # Dados de rotas de centralidades (arquivos parquet criptografados)
+        # Forçar limpeza antes de carregar dados grandes
+        optimize_memory()
+        
+        # Dados de centralidades (arquivo CSV não criptografado) - CARREGAMENTO OTIMIZADO
+        logger.info("📂 Carregando dados de centralidades (arquivo pesado)...")
+        
+        centralidades_path = "Dados/Entrada/centralidades.csv"
+        
+        # Verificar se arquivo existe
+        if not os.path.exists(centralidades_path):
+            logger.error(f"❌ Arquivo de centralidades não encontrado: {centralidades_path}")
+            st.error(f"❌ Arquivo de centralidades não encontrado: {centralidades_path}")
+            st.stop()
+        
+        # Verificar tamanho do arquivo
+        file_size_mb = os.path.getsize(centralidades_path) / (1024 * 1024)
+        logger.info(f"📊 Tamanho do arquivo de centralidades: {file_size_mb:.1f}MB")
+        
+        # Mostrar indicador de progresso para arquivos grandes
+        if file_size_mb > 10:  # Se maior que 10MB, mostrar progresso
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            status_text.text("🔄 Carregando arquivo de centralidades...")
+            progress_bar.progress(0.1)
+        
+        try:
+            # Usar função segura para carregar arquivo grande
+            if file_size_mb > 10:
+                status_text.text("📊 Carregando dados de centralidades com otimizações...")
+                progress_bar.progress(0.3)
+            
+            dados_centralidades = load_large_csv_safely(centralidades_path, max_size_mb=50)
+            logger.info(f"✅ Dados de centralidades carregados: {dados_centralidades.height} registros")
+            
+            if file_size_mb > 10:
+                progress_bar.progress(1.0)
+                status_text.text("✅ Dados de centralidades carregados com sucesso!")
+                time.sleep(1)  # Mostrar mensagem de sucesso por 1 segundo
+                progress_bar.empty()
+                status_text.empty()
+                
+        except Exception as e:
+            logger.error(f"❌ Erro ao carregar centralidades: {e}")
+            
+            if file_size_mb > 10:
+                status_text.text("❌ Erro ao carregar centralidades...")
+                progress_bar.progress(0.5)
+            
+            # Mostrar erro específico para o usuário
+            if "MemoryError" in str(e) or "out of memory" in str(e).lower():
+                if file_size_mb > 10:
+                    progress_bar.empty()
+                    status_text.empty()
+                
+                st.error(f"""
+                ❌ **Erro de Memória ao Carregar Centralidades**
+                
+                O arquivo de centralidades ({file_size_mb:.1f}MB) é muito grande para o ambiente atual.
+                
+                **Soluções sugeridas:**
+                - Tente recarregar a página
+                - Use a análise por Municípios ou UTPs como alternativa
+                - Entre em contato com o administrador do sistema
+                """)
+                st.stop()
+            else:
+                if file_size_mb > 10:
+                    progress_bar.empty()
+                    status_text.empty()
+                
+                st.error(f"❌ Erro ao carregar dados de centralidades: {str(e)}")
+                st.stop()
+        
+        # Forçar limpeza após carregar centralidades
+        optimize_memory()
+        
+        # Dados de rotas de centralidades (arquivos parquet criptografados) - carregamento silencioso
+        logger.info("🔐 Carregando dados comerciais criptografados...")
         comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet", password)
+        logger.info(f"✅ Dados comerciais carregados: {comerciais.height} registros")
+        
+        logger.info("🔐 Carregando dados executivos criptografados...")
         executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet", password)
+        logger.info(f"✅ Dados executivos carregados: {executivos.height} registros")
+        
+        logger.info("🔐 Carregando dados de classificação criptografados...")
         classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/classificacao_pares.parquet", password)
+        logger.info(f"✅ Dados de classificação carregados: {classificacao.height} registros")
+        
+        logger.info("🔐 Carregando dados de aeroportos criptografados...")
         aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        logger.info(f"✅ Dados de aeroportos carregados: {aeroportos.height} registros")
+        
+        # Verificar uso final de memória
+        final_memory = check_memory_usage()
+        memory_used = final_memory - initial_memory
+        
+        logger.info(f"📊 Carregamento de centralidades concluído - Memória utilizada: {memory_used:.1f}MB")
+        logger.info("✅ Todos os dados de centralidades carregados com sucesso")
         
         return dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos
         
     except Exception as e:
-        st.error(f"❌ Erro ao carregar dados de centralidades: {str(e)}")
+        logger.error(f"❌ ERRO CRÍTICO ao carregar dados de centralidades: {str(e)}")
+        logger.error(f"📍 Tipo do erro: {type(e).__name__}")
+        
+        # Mostrar erro mais amigável para o usuário
+        if "MemoryError" in str(e) or "out of memory" in str(e).lower():
+            st.error("""
+            ❌ **Erro de Memória ao Carregar Centralidades**
+            
+            O arquivo de centralidades é muito grande para o ambiente atual. 
+            
+            **Soluções sugeridas:**
+            - Tente recarregar a página
+            - Use a análise por Municípios ou UTPs como alternativa
+            - Entre em contato com o administrador do sistema
+            """)
+        else:
+            st.error(f"❌ Erro ao carregar dados de centralidades: {str(e)}")
+        
         st.stop()
 
 # Cache para lookups de coordenadas
@@ -948,6 +1152,16 @@ with st.sidebar:
     if st.button("🚪 Sair", use_container_width=True, type="secondary"):
         logout()
     
+    # Botão de emergência para limpar cache (apenas se houver problemas de memória)
+    current_memory = check_memory_usage()
+    if current_memory > 300:  # Se memória > 300MB, mostrar botão
+        if st.button("🧹 Limpar Cache", use_container_width=True, type="secondary", help="Limpa cache para liberar memória"):
+            if safe_clear_cache():
+                st.success("✅ Cache limpo com sucesso!")
+                st.rerun()
+            else:
+                st.error("❌ Erro ao limpar cache")
+    
     st.markdown("---")
     
     # Seleção da página
@@ -1052,6 +1266,28 @@ elif pagina_atual == "utps":
     mun_coords_cache, aero_coords_cache = create_utp_coordinate_maps(dados_utps, aeroportos)
     
 else:  # centralidades
+    # Verificar memória antes de carregar centralidades
+    current_memory = check_memory_usage()
+    if current_memory > 400:  # Se memória > 400MB, limpar cache primeiro
+        logger.warning(f"⚠️ Memória alta antes de carregar centralidades: {current_memory:.1f}MB - Limpando cache")
+        safe_clear_cache()
+        current_memory = check_memory_usage()
+        logger.info(f"📊 Memória após limpeza: {current_memory:.1f}MB")
+    
+    # Mostrar aviso se memória ainda estiver alta
+    if current_memory > 500:
+        st.warning(f"""
+        ⚠️ **Aviso de Memória Alta**
+        
+        O sistema detectou uso de memória elevado ({current_memory:.1f}MB). 
+        O carregamento de centralidades pode ser mais lento ou falhar.
+        
+        **Recomendações:**
+        - Use o botão "Limpar Cache" na barra lateral
+        - Considere usar análise por Municípios ou UTPs
+        - Recarregue a página se necessário
+        """)
+    
     dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos = load_centralidade_data()
     
     # Criar dicionários de mapeamento código -> nome com UF para centralidades
