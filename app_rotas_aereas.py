@@ -163,12 +163,10 @@ def check_memory_usage():
         
         logger.debug(f"MEMORIA: Uso atual: {memory_mb:.1f}MB")
         
-        # Limpar cache silenciosamente se memória > 512MB
-        if memory_mb > 512:
-            logger.warning(f"AVISO: Alto uso de memoria detectado: {memory_mb:.1f}MB - Limpando cache")
-            # Evitar chamar clear em decorador; uso seguro
-            optimize_memory()
-            logger.info("OK: Cache limpo e memoria otimizada")
+        # Apenas monitorar memória sem limpeza automática
+        if memory_mb > 1024:  # Só alertar se muito alto (1GB+)
+            logger.warning(f"AVISO: Alto uso de memoria detectado: {memory_mb:.1f}MB")
+            # NÃO limpar cache automaticamente - pode afetar busca de rotas
             
         return memory_mb
     except Exception as e:
@@ -705,10 +703,9 @@ def health_check():
         # Resetar contador de erros se aplicação está estável
         auto_recovery.reset_error_count()
         
-        # Verificar memória
+        # Verificar memória - apenas monitorar
         memory_usage = check_memory_usage()
-        if memory_usage > 1000:  # 1GB
-            logger.warning(f"⚠️ Uso de memória alto: {memory_usage:.1f}MB")
+        logger.info(f"INFO: Uso de memoria atual: {memory_usage:.1f}MB")
         
         # Verificar arquivos críticos
         critical_files = [
@@ -964,11 +961,10 @@ def load_voos_by_region_smart(origem_cod: str, destino_cod: str, password: str, 
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM {table_name}
                 {where_clause}
-                LIMIT 10000
             """
             arrow_data = con.execute(query, params).arrow()
         except Exception:
-            # Fallback para tabela principal com LIMIT para segurança
+            # Fallback para tabela principal - DADOS COMPLETOS
             query = f"""
                 SELECT 
                   SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
@@ -976,15 +972,31 @@ def load_voos_by_region_smart(origem_cod: str, destino_cod: str, password: str, 
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM mun_centralidade_voos_{tipo_voo}
                 {where_clause}
-                LIMIT 10000
             """
             arrow_data = con.execute(query, params).arrow()
             
         return pl.from_arrow(arrow_data)
         
     except Exception as e:
-        logger.warning(f"AVISO: Erro ao carregar dados por região: {str(e)}")
-        return pl.DataFrame([])
+        logger.error(f"ERRO CRITICO: Erro ao carregar dados por região: {str(e)}")
+        # NÃO retornar DataFrame vazio - tentar fallback direto
+        con = get_duckdb_connection()
+        try:
+            # Fallback direto para tabela principal sem limitações
+            query = f"""
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_{tipo_voo}
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                  AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+            """
+            arrow_data = con.execute(query, [origem_cod, destino_cod]).arrow()
+            return pl.from_arrow(arrow_data)
+        except Exception as e2:
+            logger.error(f"ERRO CRITICO: Fallback também falhou: {str(e2)}")
+            return pl.DataFrame([])
     finally:
         con.close()
 
@@ -1440,13 +1452,9 @@ elif pagina_atual == "utps":
     mun_coords_cache, aero_coords_cache = create_utp_coordinate_maps(dados_utps, aeroportos)
     
 else:  # centralidades
-    # Verificar memória antes de carregar centralidades
+    # Verificar memória antes de carregar centralidades - SEM LIMPEZA FORÇADA
     current_memory = check_memory_usage()
-    if current_memory > 400:  # Se memória > 400MB, limpar cache primeiro
-        logger.warning(f"AVISO: Memoria alta antes de carregar centralidades: {current_memory:.1f}MB - Limpando cache")
-        safe_clear_cache()
-        current_memory = check_memory_usage()
-        logger.info(f"MEMORIA: Apos limpeza: {current_memory:.1f}MB")
+    logger.info(f"MEMORIA: Antes de carregar centralidades: {current_memory:.1f}MB")
     
     # Mostrar aviso se memória ainda estiver alta
    
