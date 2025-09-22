@@ -11,6 +11,8 @@ import hashlib
 import io
 import platform
 import gc  # Garbage collection
+import duckdb
+import tempfile
 try:
     import psutil  # Monitoramento de memória
     PSUTIL_AVAILABLE = True
@@ -135,13 +137,14 @@ def suppress_stdout():
             sys.stdout = old_stdout
 
 # Monkey patch para suprimir mensagens de cache
-original_cache_data = st.cache_data
-def silent_cache_data(*args, **kwargs):
-    # Remover mensagens de execução
-    kwargs['show_spinner'] = False
-    return original_cache_data(*args, **kwargs)
-
-st.cache_data = silent_cache_data
+try:
+    original_cache_data = st.cache_data
+    def silent_cache_data(*args, **kwargs):
+        kwargs['show_spinner'] = False
+        return original_cache_data(*args, **kwargs)
+    # Não sobrescrever o atributo; apenas usar localmente quando necessário
+except Exception:
+    pass
 
 # Configurações de otimização de memória
 def optimize_memory():
@@ -163,8 +166,7 @@ def check_memory_usage():
         # Limpar cache silenciosamente se memória > 512MB
         if memory_mb > 512:
             logger.warning(f"⚠️ Alto uso de memória detectado: {memory_mb:.1f}MB - Limpando cache")
-            # Limpar cache do Streamlit quando memória alta (sem aviso)
-            st.cache_data.clear()
+            # Evitar chamar clear em decorador; uso seguro
             optimize_memory()
             logger.info("✅ Cache limpo e memória otimizada")
             
@@ -501,88 +503,139 @@ def _verify_file_integrity(encrypted_data: bytes, config: dict) -> bool:
     except Exception:
         return False
 
-# Função legada removida - todos os arquivos agora usam sistema multicamadas
-
-def decrypt_file(encrypted_file_path: str, password: str) -> bytes:
-    """Descriptografa um arquivo usando sistema multicamadas de segurança com compressão"""
-    config = _get_crypto_config()
-    
-    # Gerar chave multicamadas
+def _encrypt_bytes(data: bytes, password: str) -> bytes:
     key = _derive_multilayer_key(password)
     fernet = Fernet(key)
-    
-    # Ler arquivo criptografado
     try:
-        with open(encrypted_file_path, 'rb') as encrypted_file:
-            encrypted_data = encrypted_file.read()
-    except Exception as e:
-        raise FileNotFoundError(f"Não foi possível ler o arquivo: {encrypted_file_path}")
-    
-    # Verificar integridade
-    if not _verify_file_integrity(encrypted_data, config):
-        raise ValueError("Falha na verificação de integridade do arquivo")
-    
-    # Descriptografar dados
-    try:
-        decrypted_compressed_data = fernet.decrypt(encrypted_data)
-        
-        # Tentar descomprimir (arquivos novos com compressão)
-        try:
-            import gzip
-            decrypted_data = gzip.decompress(decrypted_compressed_data)
-            return decrypted_data
-        except Exception:
-            # Se falhar na descompressão, retornar dados descriptografados diretamente
-            # (compatibilidade com arquivos antigos sem compressão)
-            return decrypted_compressed_data
-            
-    except Exception as e:
-        raise ValueError(f"Falha na descriptografia - chave ou arquivo inválido: {e}")
+        import gzip
+        compressed = gzip.compress(data)
+    except Exception:
+        compressed = data
+    return fernet.encrypt(compressed)
 
-def read_encrypted_parquet(file_path: str, password: str, lazy: bool = True) -> pl.DataFrame:
-    """Lê um arquivo parquet criptografado usando sistema de segurança avançado"""
+def _decrypt_bytes(encrypted_data: bytes, password: str) -> bytes:
+    key = _derive_multilayer_key(password)
+    fernet = Fernet(key)
+    decrypted = fernet.decrypt(encrypted_data)
     try:
-        logger.debug(f"🔐 Iniciando leitura de arquivo criptografado: {file_path}")
-        
-        # Otimização de memória inicial
-        optimize_memory()
-        
-        # Adicionar extensão .encrypted se não estiver presente
-        if not file_path.endswith('.encrypted'):
-            encrypted_file_path = file_path + '.encrypted'
-        else:
-            encrypted_file_path = file_path
-        
-        logger.debug(f"📁 Caminho do arquivo: {encrypted_file_path}")
-        
-        # Verificar se o arquivo criptografado existe
-        if not os.path.exists(encrypted_file_path):
-            logger.error(f"❌ Arquivo não encontrado: {encrypted_file_path}")
-            raise FileNotFoundError(f"Arquivo criptografado não encontrado: {encrypted_file_path}")
-        
-        logger.debug(f"✅ Arquivo encontrado, tamanho: {os.path.getsize(encrypted_file_path)} bytes")
-        
-        # Descriptografar arquivo
-        logger.debug("🔓 Iniciando descriptografia...")
-        decrypted_data = decrypt_file(encrypted_file_path, password)
-        logger.debug(f"✅ Descriptografia concluída, dados: {len(decrypted_data)} bytes")
-        
-        # Ler dados descriptografados como parquet usando Polars
-        logger.debug("📊 Convertendo para DataFrame Polars...")
-        df = pl.read_parquet(io.BytesIO(decrypted_data))
-        logger.debug(f"✅ DataFrame criado: {df.height} linhas x {df.width} colunas")
-        
-        # Limpar dados temporários da memória
-        del decrypted_data
-        optimize_memory()
-        
-        logger.debug(f"✅ Arquivo {file_path} carregado com sucesso")
-        return df
-        
-    except Exception as e:
-        logger.error(f"❌ ERRO ao ler arquivo criptografado {file_path}: {str(e)}")
-        logger.error(f"📍 Tipo do erro: {type(e).__name__}")
-        raise
+        import gzip
+        return gzip.decompress(decrypted)
+    except Exception:
+        return decrypted
+
+def _get_encrypted_db_path() -> str:
+    # Guardar o arquivo do banco criptografado dentro de Dados/
+    os.makedirs('Dados', exist_ok=True)
+    return os.path.join('Dados', 'od_aereo.duckdb.enc')
+
+def _create_duckdb_and_import_all_data(temp_db_path: str) -> None:
+    """Cria um banco DuckDB e importa todos os dados de Dados/."""
+    con = duckdb.connect(temp_db_path)
+    try:
+        dados_base = 'Dados'
+        # Importar CSVs
+        csv_mun_utps = os.path.join(dados_base, 'Entrada', 'mun_UTPs.csv')
+        if os.path.exists(csv_mun_utps):
+            con.execute("DROP TABLE IF EXISTS mun_utps")
+            con.execute("CREATE TABLE mun_utps AS SELECT * FROM read_csv_auto(?, header=true)", [csv_mun_utps])
+            logger.info("✅ Tabela mun_utps criada")
+        csv_centralidades = os.path.join(dados_base, 'Entrada', 'centralidades.csv')
+        if os.path.exists(csv_centralidades):
+            con.execute("DROP TABLE IF EXISTS centralidades")
+            con.execute("CREATE TABLE centralidades AS SELECT * FROM read_csv_auto(?, header=true)", [csv_centralidades])
+            logger.info("✅ Tabela centralidades criada")
+        # Importar Parquet de aeroportos
+        pq_aeroportos = os.path.join(dados_base, 'Entrada', 'aeroportos.parquet')
+        if os.path.exists(pq_aeroportos):
+            con.execute("DROP TABLE IF EXISTS aeroportos")
+            con.execute("CREATE TABLE aeroportos AS SELECT * FROM read_parquet(?)", [pq_aeroportos])
+            logger.info("✅ Tabela aeroportos criada")
+        # Mapear e importar todos os parquet de resultados
+        mapas = [
+            (
+                os.path.join(dados_base, 'Resultados', 'Pares OD - Por Municipio - Matriz Infra S.A. - 2019'),
+                {
+                    'Voos Comerciais.parquet': 'por_municipio_voos_comerciais',
+                    'Voos Executivos.parquet': 'por_municipio_voos_executivos',
+                    'classificacao_pares.parquet': 'por_municipio_classificacao'
+                }
+            ),
+            (
+                os.path.join(dados_base, 'Resultados', 'Pares OD - Agregação UTP - Matriz Infra S.A. - 2019'),
+                {
+                    'Voos Comerciais.parquet': 'utp_voos_comerciais',
+                    'Voos Executivos.parquet': 'utp_voos_executivos',
+                    'classificacao_pares.parquet': 'utp_classificacao'
+                }
+            ),
+            (
+                os.path.join(dados_base, 'Resultados', 'Pares OD - Municipio x Centralidade'),
+                {
+                    'Voos Comerciais.parquet': 'mun_centralidade_voos_comerciais',
+                    'Voos Executivos.parquet': 'mun_centralidade_voos_executivos',
+                    'classificacao_pares.parquet': 'mun_centralidade_classificacao'
+                }
+            )
+        ]
+        for pasta, nomes in mapas:
+            for arquivo, tabela in nomes.items():
+                caminho = os.path.join(pasta, arquivo)
+                if os.path.exists(caminho):
+                    con.execute(f"DROP TABLE IF EXISTS {tabela}")
+                    con.execute(f"CREATE TABLE {tabela} AS SELECT * FROM read_parquet(?)", [caminho])
+                    logger.info(f"✅ Tabela {tabela} criada a partir de {caminho}")
+        con.commit()
+    finally:
+        # Não fechar conexão singleton
+        pass
+
+def _ensure_encrypted_duckdb(password: str) -> str:
+    """Gera (se necessário) e retorna o caminho do banco DuckDB criptografado."""
+    enc_path = _get_encrypted_db_path()
+    if not os.path.exists(enc_path):
+        logger.info("🔧 Criando banco DuckDB e importando dados...")
+        with tempfile.TemporaryDirectory() as td:
+            temp_db = os.path.join(td, 'od_aereo.duckdb')
+            _create_duckdb_and_import_all_data(temp_db)
+            with open(temp_db, 'rb') as f:
+                db_bytes = f.read()
+            enc_bytes = _encrypt_bytes(db_bytes, password)
+            with open(enc_path, 'wb') as f:
+                f.write(enc_bytes)
+        logger.info("✅ Banco DuckDB criptografado criado")
+    return enc_path
+
+def _decrypt_db_to_temp(password: str) -> str:
+    enc_path = _ensure_encrypted_duckdb(password)
+    with open(enc_path, 'rb') as f:
+        enc_bytes = f.read()
+    plain_bytes = _decrypt_bytes(enc_bytes, password)
+    tmp_dir = tempfile.mkdtemp(prefix='od_aereo_db_')
+    tmp_db = os.path.join(tmp_dir, 'od_aereo.duckdb')
+    with open(tmp_db, 'wb') as f:
+        f.write(plain_bytes)
+    return tmp_db
+
+@st.cache_resource(show_spinner=False)
+def _db_state():
+    # Desbloqueia apenas uma vez no ciclo de vida do app
+    pwd = get_files_password()
+    tmp_db_path = _decrypt_db_to_temp(pwd)
+    con = duckdb.connect(tmp_db_path, read_only=False)
+    return {'path': tmp_db_path, 'con': con}
+
+def get_duckdb_connection():
+    """Retorna conexão DuckDB persistente; reabre sem redescifrar se necessário."""
+    state = _db_state()
+    con = state['con']
+    try:
+        con.execute("SELECT 1")
+        return con
+    except Exception:
+        # Reabrir usando o arquivo temporário já descriptografado
+        new_con = duckdb.connect(state['path'], read_only=False)
+        state['con'] = new_con
+        return new_con
 
 def get_files_password():
     """Obtém a senha dos arquivos do secrets.toml com verificações de segurança"""
@@ -603,23 +656,14 @@ def get_files_password():
     return config['password']
 
 def check_data_files():
-    """Verifica se todos os arquivos de dados criptografados necessários existem"""
-    required_files = [
-        "Dados/Entrada/aeroportos.parquet.encrypted",
-        "Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet.encrypted",
-        "Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet.encrypted",
-        "Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Comerciais.parquet.encrypted",
-        "Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Executivos.parquet.encrypted",
-        "Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet.encrypted",
-        "Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet.encrypted"
-    ]
-    
-    missing_files = []
-    for file_path in required_files:
-        if not os.path.exists(file_path):
-            missing_files.append(file_path)
-    
-    return missing_files
+    """Verifica se o banco DuckDB criptografado existe (gera se necessário)."""
+    try:
+        password = get_files_password()
+        _ensure_encrypted_duckdb(password)
+        return []
+    except Exception as e:
+        logger.error(f"❌ Erro ao preparar banco DuckDB: {e}")
+        return ["Banco DuckDB não disponível"]
 
 # Configuração da página
 st.set_page_config(
@@ -700,7 +744,7 @@ if not st.session_state.authenticated:
 logger.info("✅ Usuário autenticado - Iniciando aplicação principal")
 
 # Aplicativo principal (só executa se autenticado)
-@st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
+@st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
 def load_municipios_data():
     """Carrega dados para análise por municípios com otimização de memória"""
     try:
@@ -710,11 +754,10 @@ def load_municipios_data():
         initial_memory = check_memory_usage()
         logger.debug(f"📊 Memória inicial: {initial_memory:.1f}MB")
         
-        # Verificar se arquivos criptografados existem
+        # Garantir banco DuckDB disponível
         missing_files = check_data_files()
         if missing_files:
-            logger.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
-            st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
+            st.error("❌ Banco de dados não disponível")
             st.stop()
         
         logger.info("✅ Verificação de arquivos concluída")
@@ -723,36 +766,79 @@ def load_municipios_data():
         password = get_files_password()
         logger.info("✅ Senha dos arquivos obtida com sucesso")
         
-        # Dados dos municípios (arquivo CSV não criptografado) - otimizado
-        logger.info("📂 Carregando dados de municípios...")
-        dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
-            'long_utp': 'long',
-            'lat_utp': 'lat'
-        }).with_columns(
-            pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
-        ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
+        # Conectar ao DuckDB descriptografado
+        con = get_duckdb_connection()
+        
+        # Dados dos municípios a partir do DuckDB
+        logger.info("📂 Carregando dados de municípios do DuckDB...")
+        arrow_mun = con.execute(
+            """
+            SELECT 
+              SUBSTR(CAST(municipio AS VARCHAR),1,6) AS municipio,
+              nome_municipio,
+              uf,
+              lat_utp AS lat,
+              long_utp AS "long"
+            FROM mun_utps
+            """
+        ).arrow()
+        dados_municipios = pl.from_arrow(arrow_mun)
         
         logger.info(f"✅ Dados de municípios carregados: {dados_municipios.height} registros")
         
         # Forçar limpeza antes de carregar dados grandes
         optimize_memory()
         
-        # Dados de rotas de municípios (arquivos parquet criptografados) - carregamento silencioso
-        logger.info("🔐 Carregando dados comerciais criptografados...")
-        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
+        # Dados de rotas de municípios (DuckDB)
+        logger.info("🔐 Carregando dados comerciais do DuckDB...")
+        comerciais = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM por_municipio_voos_comerciais
+                """
+            ).arrow()
+        )
         logger.info(f"✅ Dados comerciais carregados: {comerciais.height} registros")
         
-        logger.info("🔐 Carregando dados executivos criptografados...")
-        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
+        logger.info("🔐 Carregando dados executivos do DuckDB...")
+        executivos = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM por_municipio_voos_executivos
+                """
+            ).arrow()
+        )
         logger.info(f"✅ Dados executivos carregados: {executivos.height} registros")
         
-        logger.info("🔐 Carregando dados de classificação criptografados...")
-        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Por Municipio - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
+        logger.info("🔐 Carregando dados de classificação do DuckDB...")
+        classificacao = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM por_municipio_classificacao
+                """
+            ).arrow()
+        )
         logger.info(f"✅ Dados de classificação carregados: {classificacao.height} registros")
         
-        logger.info("🔐 Carregando dados de aeroportos criptografados...")
-        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        logger.info("🔐 Carregando dados de aeroportos do DuckDB...")
+        aeroportos = pl.from_arrow(
+            con.execute("SELECT * FROM aeroportos").arrow()
+        )
         logger.info(f"✅ Dados de aeroportos carregados: {aeroportos.height} registros")
+        
+        # Não fechar conexão singleton
         
         # Verificar uso final de memória
         final_memory = check_memory_usage()
@@ -769,30 +855,33 @@ def load_municipios_data():
         st.error(f"❌ Erro ao carregar dados de municípios: {str(e)}")
         st.stop()
 
-@st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
+@st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
 def load_utp_data():
     """Carrega dados para análise por UTPs"""
     try:
-        # Verificar se arquivos criptografados existem
+        # Garantir banco DuckDB disponível
         missing_files = check_data_files()
         if missing_files:
-            st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
+            st.error("❌ Banco de dados não disponível")
             st.stop()
         
-        # Obter senha dos arquivos
+        # Obter senha dos arquivos e conectar
         password = get_files_password()
+        con = get_duckdb_connection()
         
-        # Dados das UTPs (arquivo CSV não criptografado)
-        dados_utps = pl.read_csv("Dados/Entrada/mun_UTPs.csv")
+        # Dados das UTPs
+        dados_utps = pl.from_arrow(con.execute("SELECT * FROM mun_utps").arrow())
         
         # Criar mapeamento de UTPs
         utp_info = dados_utps.select(['utp', 'nome_utp']).unique().sort('utp')
         
-        # Dados de rotas de UTPs (arquivos parquet criptografados)
-        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Comerciais.parquet", password)
-        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/Voos Executivos.parquet", password)
-        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Agregação UTP - Matriz Infra S.A. - 2019/classificacao_pares.parquet", password)
-        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        # Dados de rotas de UTPs do DuckDB
+        comerciais = pl.from_arrow(con.execute("SELECT * FROM utp_voos_comerciais").arrow())
+        executivos = pl.from_arrow(con.execute("SELECT * FROM utp_voos_executivos").arrow())
+        classificacao = pl.from_arrow(con.execute("SELECT * FROM utp_classificacao").arrow())
+        aeroportos = pl.from_arrow(con.execute("SELECT * FROM aeroportos").arrow())
+        
+        # Não fechar conexão singleton
         
         return dados_utps, utp_info, comerciais, executivos, classificacao, aeroportos
         
@@ -800,7 +889,6 @@ def load_utp_data():
         st.error(f"❌ Erro ao carregar dados de UTPs: {str(e)}")
         st.stop()
 
-@st.cache_data(ttl=7200, max_entries=2)  # Cache por 2 horas, máximo 2 entradas para economizar memória
 def load_centralidade_data():
     """Carrega dados para análise por centralidades com otimizações de memória"""
     try:
@@ -810,119 +898,91 @@ def load_centralidade_data():
         initial_memory = check_memory_usage()
         logger.debug(f"📊 Memória inicial: {initial_memory:.1f}MB")
         
-        # Verificar se arquivos criptografados existem
+        # Garantir banco DuckDB disponível
         missing_files = check_data_files()
         if missing_files:
-            logger.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
-            st.error(f"❌ Arquivos criptografados não encontrados: {missing_files[:3]}...")
+            logger.error("❌ Banco de dados não disponível")
+            st.error("❌ Banco de dados não disponível")
             st.stop()
         
-        # Obter senha dos arquivos
+        # Obter senha e conectar
         password = get_files_password()
+        con = get_duckdb_connection()
         logger.info("✅ Senha dos arquivos obtida com sucesso")
         
-        # Dados dos municípios (arquivo CSV não criptografado) - otimizado
-        logger.info("📂 Carregando dados de municípios...")
-        dados_municipios = pl.read_csv("Dados/Entrada/mun_UTPs.csv").rename({
-            'long_utp': 'long',
-            'lat_utp': 'lat'
-        }).with_columns(
-            pl.col('municipio').cast(pl.Utf8).str.slice(0,6).alias('municipio')
-        ).select(['municipio', 'nome_municipio', 'uf', 'lat', 'long'])
+        # Dados dos municípios (DuckDB)
+        logger.info("📂 Carregando dados de municípios do DuckDB...")
+        arrow_mun = con.execute(
+            """
+            SELECT 
+              SUBSTR(CAST(municipio AS VARCHAR),1,6) AS municipio,
+              nome_municipio,
+              uf,
+              lat_utp AS lat,
+              long_utp AS "long"
+            FROM mun_utps
+            """
+        ).arrow()
+        dados_municipios = pl.from_arrow(arrow_mun)
         
         logger.info(f"✅ Dados de municípios carregados: {dados_municipios.height} registros")
         
         # Forçar limpeza antes de carregar dados grandes
         optimize_memory()
         
-        # Dados de centralidades (arquivo CSV não criptografado) - CARREGAMENTO OTIMIZADO
-        logger.info("📂 Carregando dados de centralidades (arquivo pesado)...")
-        
-        centralidades_path = "Dados/Entrada/centralidades.csv"
-        
-        # Verificar se arquivo existe
-        if not os.path.exists(centralidades_path):
-            logger.error(f"❌ Arquivo de centralidades não encontrado: {centralidades_path}")
-            st.error(f"❌ Arquivo de centralidades não encontrado: {centralidades_path}")
-            st.stop()
-        
-        # Verificar tamanho do arquivo
-        file_size_mb = os.path.getsize(centralidades_path) / (1024 * 1024)
-        logger.info(f"📊 Tamanho do arquivo de centralidades: {file_size_mb:.1f}MB")
-        
-        # Mostrar indicador de progresso para arquivos grandes
-        if file_size_mb > 10:  # Se maior que 10MB, mostrar progresso
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            status_text.text("🔄 Carregando arquivo de centralidades...")
-            progress_bar.progress(0.1)
-        
-        try:
-            # Usar função segura para carregar arquivo grande
-            if file_size_mb > 10:
-                status_text.text("📊 Carregando dados de centralidades com otimizações...")
-                progress_bar.progress(0.3)
-            
-            dados_centralidades = load_large_csv_safely(centralidades_path, max_size_mb=50)
-            logger.info(f"✅ Dados de centralidades carregados: {dados_centralidades.height} registros")
-            
-            if file_size_mb > 10:
-                progress_bar.progress(1.0)
-                status_text.text("✅ Dados de centralidades carregados com sucesso!")
-                time.sleep(1)  # Mostrar mensagem de sucesso por 1 segundo
-                progress_bar.empty()
-                status_text.empty()
-                
-        except Exception as e:
-            logger.error(f"❌ Erro ao carregar centralidades: {e}")
-            
-            if file_size_mb > 10:
-                status_text.text("❌ Erro ao carregar centralidades...")
-                progress_bar.progress(0.5)
-            
-            # Mostrar erro específico para o usuário
-            if "MemoryError" in str(e) or "out of memory" in str(e).lower():
-                if file_size_mb > 10:
-                    progress_bar.empty()
-                    status_text.empty()
-                
-                st.error(f"""
-                ❌ **Erro de Memória ao Carregar Centralidades**
-                
-                O arquivo de centralidades ({file_size_mb:.1f}MB) é muito grande para o ambiente atual.
-                
-                **Soluções sugeridas:**
-                - Tente recarregar a página
-                - Use a análise por Municípios ou UTPs como alternativa
-                - Entre em contato com o administrador do sistema
-                """)
-                st.stop()
-            else:
-                if file_size_mb > 10:
-                    progress_bar.empty()
-                    status_text.empty()
-                
-                st.error(f"❌ Erro ao carregar dados de centralidades: {str(e)}")
-                st.stop()
+        # NÃO carregar tabela toda de centralidades (muito pesada) para acelerar
+        dados_centralidades = pl.DataFrame([])
         
         # Forçar limpeza após carregar centralidades
         optimize_memory()
         
-        # Dados de rotas de centralidades (arquivos parquet criptografados) - carregamento silencioso
-        logger.info("🔐 Carregando dados comerciais criptografados...")
-        comerciais = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Comerciais.parquet", password)
+        # Dados de rotas de centralidades (DuckDB)
+        logger.info("🔐 Carregando dados comerciais do DuckDB...")
+        comerciais = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_comerciais
+                """
+            ).arrow()
+        )
         logger.info(f"✅ Dados comerciais carregados: {comerciais.height} registros")
         
-        logger.info("🔐 Carregando dados executivos criptografados...")
-        executivos = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/Voos Executivos.parquet", password)
+        logger.info("🔐 Carregando dados executivos do DuckDB...")
+        executivos = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_executivos
+                """
+            ).arrow()
+        )
         logger.info(f"✅ Dados executivos carregados: {executivos.height} registros")
         
-        logger.info("🔐 Carregando dados de classificação criptografados...")
-        classificacao = read_encrypted_parquet("Dados/Resultados/Pares OD - Municipio x Centralidade/classificacao_pares.parquet", password)
+        logger.info("🔐 Carregando dados de classificação do DuckDB...")
+        classificacao = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_classificacao
+                """
+            ).arrow()
+        )
         logger.info(f"✅ Dados de classificação carregados: {classificacao.height} registros")
         
-        logger.info("🔐 Carregando dados de aeroportos criptografados...")
-        aeroportos = read_encrypted_parquet('Dados/Entrada/aeroportos.parquet', password)
+        logger.info("🔐 Carregando dados de aeroportos do DuckDB...")
+        aeroportos = pl.from_arrow(con.execute("SELECT * FROM aeroportos").arrow())
+        
+        con.close()
         logger.info(f"✅ Dados de aeroportos carregados: {aeroportos.height} registros")
         
         # Verificar uso final de memória
@@ -956,7 +1016,7 @@ def load_centralidade_data():
         st.stop()
 
 # Cache para lookups de coordenadas
-@st.cache_data(ttl=7200, max_entries=5)  # Cache por 2 horas, máximo 5 entradas
+@st.cache_data(ttl=7200, max_entries=5, show_spinner=False)
 def create_coordinate_maps(dados_municipios, aeroportos):
     # Criar dicionários para lookup rápido de coordenadas
     mun_coords = {}
@@ -1152,15 +1212,8 @@ with st.sidebar:
     if st.button("🚪 Sair", use_container_width=True, type="secondary"):
         logout()
     
-    # Botão de emergência para limpar cache (apenas se houver problemas de memória)
+    # Ocultar botões e avisos de cache/memória
     current_memory = check_memory_usage()
-    if current_memory > 300:  # Se memória > 300MB, mostrar botão
-        if st.button("🧹 Limpar Cache", use_container_width=True, type="secondary", help="Limpa cache para liberar memória"):
-            if safe_clear_cache():
-                st.success("✅ Cache limpo com sucesso!")
-                st.rerun()
-            else:
-                st.error("❌ Erro ao limpar cache")
     
     st.markdown("---")
     
@@ -1185,7 +1238,7 @@ if pagina_atual == "municipios":
     dados_municipios, comerciais, executivos, classificacao, aeroportos = load_municipios_data()
     
     # Criar dicionários de mapeamento código -> nome com UF para municípios
-    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
+    @st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
     def create_municipio_mappings(comerciais, executivos, dados_municipios):
         mun_map = {}
         uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
@@ -1224,7 +1277,7 @@ elif pagina_atual == "utps":
     dados_utps, utp_info, comerciais, executivos, classificacao, aeroportos = load_utp_data()
     
     # Criar dicionários de mapeamento UTP
-    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
+    @st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
     def create_utp_mappings(comerciais, executivos, dados_utps):
         utp_map = {}
         
@@ -1249,7 +1302,7 @@ elif pagina_atual == "utps":
     item_map = create_utp_mappings(comerciais, executivos, dados_utps)
     
     # Para UTPs, usar coordenadas dos municípios sede
-    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
+    @st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
     def create_utp_coordinate_maps(dados_utps, aeroportos):
         utp_coords = {}
         
@@ -1275,59 +1328,219 @@ else:  # centralidades
         logger.info(f"📊 Memória após limpeza: {current_memory:.1f}MB")
     
     # Mostrar aviso se memória ainda estiver alta
-    if current_memory > 500:
-        st.warning(f"""
-        ⚠️ **Aviso de Memória Alta**
-        
-        O sistema detectou uso de memória elevado ({current_memory:.1f}MB). 
-        O carregamento de centralidades pode ser mais lento ou falhar.
-        
-        **Recomendações:**
-        - Use o botão "Limpar Cache" na barra lateral
-        - Considere usar análise por Municípios ou UTPs
-        - Recarregue a página se necessário
-        """)
+   
+    # Carregamento super rápido sob demanda (evita carregar tabelas inteiras)
+    dados_municipios, dados_centralidades, _, _, classificacao, aeroportos = load_centralidade_data()
     
-    dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos = load_centralidade_data()
-    
-    # Criar dicionários de mapeamento código -> nome com UF para centralidades
-    @st.cache_data(ttl=3600, max_entries=3)  # Cache por 1 hora, máximo 3 entradas
-    def create_centralidade_mappings(comerciais, executivos, dados_municipios):
+    # Mapeamento nome com UF a partir de dados_municipios (cobre todos os municípios)
+    @st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
+    def create_centralidade_mappings_fast(dados_municipios):
         mun_map = {}
-        uf_map = dict(zip(dados_municipios['municipio'].to_list(), dados_municipios['uf'].to_list()))
-        
-        comerciais_origem = comerciais.select(['cod_mun_origem', 'mun_origem']).rename({
-            'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
-        })
-        comerciais_destino = comerciais.select(['cod_mun_destino', 'mun_destino']).rename({
-            'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
-        })
-        executivos_origem = executivos.select(['cod_mun_origem', 'mun_origem']).rename({
-            'cod_mun_origem': 'codigo', 'mun_origem': 'nome'
-        })
-        executivos_destino = executivos.select(['cod_mun_destino', 'mun_destino']).rename({
-            'cod_mun_destino': 'codigo', 'mun_destino': 'nome'
-        })
-        
-        todos_municipios = pl.concat([
-            comerciais_origem, comerciais_destino,
-            executivos_origem, executivos_destino
-        ]).unique()
-        
-        for row in todos_municipios.iter_rows(named=True):
-            codigo = row['codigo']
-            nome = row['nome']
-            uf = uf_map.get(codigo, '')
+        for row in dados_municipios.iter_rows(named=True):
+            codigo = row['municipio']
+            nome = row['nome_municipio']
+            uf = row['uf'] or ''
             nome_com_uf = f"{nome}, {uf}" if uf else nome
             mun_map[codigo] = nome_com_uf
-        
         return mun_map
-    
-    item_map = create_centralidade_mappings(comerciais, executivos, dados_municipios)
+    item_map = create_centralidade_mappings_fast(dados_municipios)
     mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
+    
+    # Consultas SQL sob demanda para origens/destinos e rotas (ultra rápidas)
+    @st.cache_data(ttl=1200, max_entries=10, show_spinner=False)
+    def centralidades_unique_origins_sql(password: str):
+        con = get_duckdb_connection()
+        try:
+            arrow = con.execute(
+            """
+            SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
+            FROM mun_centralidade_voos_comerciais
+            UNION
+            SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
+            FROM mun_centralidade_voos_executivos
+            """
+            ).arrow()
+        except Exception:
+            # tentar reconectar e refazer
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
+            con = get_duckdb_connection()
+            arrow = con.execute(
+                """
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_comerciais
+                UNION
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_executivos
+                """
+            ).arrow()
+        return pl.from_arrow(arrow)['cod'].to_list()
+    
+    @st.cache_data(ttl=1200, max_entries=100, show_spinner=False)
+    def centralidades_destinos_para_origem_sql(password: str, origem_cod: str):
+        con = get_duckdb_connection()
+        try:
+            arrow = con.execute(
+            """
+            SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
+            FROM mun_centralidade_voos_comerciais
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+            UNION
+            SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
+            FROM mun_centralidade_voos_executivos
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+            """,
+            [origem_cod, origem_cod]
+            ).arrow()
+        except Exception:
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
+            con = get_duckdb_connection()
+            arrow = con.execute(
+                """
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_comerciais
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                UNION
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_executivos
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                """,
+                [origem_cod, origem_cod]
+            ).arrow()
+        return pl.from_arrow(arrow)['cod'].to_list()
+    
+    @st.cache_data(ttl=600, max_entries=100, show_spinner=False)
+    def centralidades_voos_para_par_sql(password: str, origem_cod: str, destino_cod: str):
+        con = get_duckdb_connection()
+        try:
+            # Comerciais
+            arrow_c = con.execute(
+            """
+            SELECT 
+              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+              * EXCLUDE (cod_mun_origem, cod_mun_destino)
+            FROM mun_centralidade_voos_comerciais
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+              AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+            """,
+            [origem_cod, destino_cod]
+            ).arrow()
+            comerciais_df = pl.from_arrow(arrow_c)
+            # Executivos
+            arrow_e = con.execute(
+            """
+            SELECT 
+              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+              * EXCLUDE (cod_mun_origem, cod_mun_destino)
+            FROM mun_centralidade_voos_executivos
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+              AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+            """,
+            [origem_cod, destino_cod]
+            ).arrow()
+        except Exception:
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
+            con = get_duckdb_connection()
+            arrow_c = con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_comerciais
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                  AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+                """,
+                [origem_cod, destino_cod]
+            ).arrow()
+            comerciais_df = pl.from_arrow(arrow_c)
+            arrow_e = con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_executivos
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                  AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+                """,
+                [origem_cod, destino_cod]
+            ).arrow()
+        executivos_df = pl.from_arrow(arrow_e)
+        return comerciais_df, executivos_df
+
+    @st.cache_data(ttl=600, max_entries=10, show_spinner=False)
+    def centralidades_contar_pares_sql(password: str):
+        con = get_duckdb_connection()
+        try:
+            c = con.execute(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT DISTINCT 
+                    SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS o,
+                    SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS d
+                  FROM mun_centralidade_voos_comerciais
+                )
+                """
+            ).fetchone()[0]
+            e = con.execute(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT DISTINCT 
+                    SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS o,
+                    SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS d
+                  FROM mun_centralidade_voos_executivos
+                )
+                """
+            ).fetchone()[0]
+        except Exception:
+            try:
+                st.cache_resource.clear()
+            except Exception:
+                pass
+            con = get_duckdb_connection()
+            c = con.execute(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT DISTINCT 
+                    SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS o,
+                    SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS d
+                  FROM mun_centralidade_voos_comerciais
+                )
+                """
+            ).fetchone()[0]
+            e = con.execute(
+                """
+                SELECT COUNT(*) FROM (
+                  SELECT DISTINCT 
+                    SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS o,
+                    SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS d
+                  FROM mun_centralidade_voos_executivos
+                )
+                """
+            ).fetchone()[0]
+        return int(c), int(e)
+
+    @st.cache_data(ttl=600, max_entries=5, show_spinner=False)
+    def centralidades_total_sql():
+        con = get_duckdb_connection()
+        try:
+            return int(con.execute("SELECT COUNT(*) FROM centralidades").fetchone()[0])
+        except Exception:
+            return 0
 
 # Criar opções pesquisáveis
-@st.cache_data(ttl=3600, max_entries=5)  # Cache por 1 hora, máximo 5 entradas
+@st.cache_data(ttl=3600, max_entries=5, show_spinner=False)
 def get_unique_origins_by_page(comerciais, executivos, pagina):
     if pagina == "utps":
         origins_comerciais = set(comerciais['UTP_origem'].unique().to_list())
@@ -1338,7 +1551,11 @@ def get_unique_origins_by_page(comerciais, executivos, pagina):
         origins_executivos = set(executivos['cod_mun_origem'].unique().to_list()) if executivos.height > 0 else set()
         return origins_comerciais.union(origins_executivos)
 
-unique_origins = get_unique_origins_by_page(comerciais, executivos, pagina_atual)
+if pagina_atual == "centralidades":
+    _pwd = get_files_password()
+    unique_origins = set(centralidades_unique_origins_sql(_pwd))
+else:
+    unique_origins = get_unique_origins_by_page(comerciais, executivos, pagina_atual)
 opcoes_origem_todas, search_map_origem = create_searchable_options({k: v for k, v in item_map.items() 
                                                                    if k in unique_origins}, 
                                                                    is_utp=(pagina_atual == "utps"))
@@ -1387,9 +1604,13 @@ if origem_selecionada:
         destinos_disponiveis_cod = {str(x) for x in list(set(destinos_comerciais + destinos_executivos))}
     else:
         # Para municípios e centralidades
-        destinos_comerciais = comerciais.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list()
-        destinos_executivos = executivos.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list() if executivos.height > 0 else []
-        destinos_disponiveis_cod = set(destinos_comerciais + destinos_executivos)
+        if pagina_atual == "centralidades":
+            _pwd = get_files_password()
+            destinos_disponiveis_cod = set(centralidades_destinos_para_origem_sql(_pwd, origem_selecionada))
+        else:
+            destinos_comerciais = comerciais.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list()
+            destinos_executivos = executivos.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list() if executivos.height > 0 else []
+            destinos_disponiveis_cod = set(destinos_comerciais + destinos_executivos)
     
     opcoes_destino_filtradas, search_map_destino = create_searchable_options({k: v for k, v in item_map.items() 
                                                                              if k in destinos_disponiveis_cod}, 
@@ -1579,15 +1800,19 @@ if origem_selecionada and destino_selecionado:
         )
     else:
         # Para municípios e centralidades
-        voos_executivos = executivos.filter(
-            (pl.col('cod_mun_origem') == origem_selecionada) & 
-            (pl.col('cod_mun_destino') == destino_selecionado)
-        )
-        
-        voos_comerciais = comerciais.filter(
-            (pl.col('cod_mun_origem') == origem_selecionada) & 
-            (pl.col('cod_mun_destino') == destino_selecionado)
-        )
+        if pagina_atual == "centralidades":
+            _pwd = get_files_password()
+            voos_comerciais, voos_executivos = centralidades_voos_para_par_sql(_pwd, origem_selecionada, destino_selecionado)
+        else:
+            voos_executivos = executivos.filter(
+                (pl.col('cod_mun_origem') == origem_selecionada) & 
+                (pl.col('cod_mun_destino') == destino_selecionado)
+            )
+            
+            voos_comerciais = comerciais.filter(
+                (pl.col('cod_mun_origem') == origem_selecionada) & 
+                (pl.col('cod_mun_destino') == destino_selecionado)
+            )
     
     if voos_executivos.height > 0:
         # Voo executivo - Display especial e prominente
@@ -2349,7 +2574,7 @@ else:
     else:
         st.markdown("### 📈 Panorama Geral - Análise por Centralidades")
         titulo_total = "Total de Centralidades"
-        total_entidades = len(dados_centralidades)
+        total_entidades = centralidades_total_sql()
     
     # Estatísticas nacionais impressionantes
     col_stat1, col_stat2, col_stat3 = st.columns(3)
@@ -2361,8 +2586,14 @@ else:
         pares_executivos = executivos.select(['UTP_origem', 'UTP_destino']).unique().height if executivos.height > 0 else 0
     else:
         # Para municípios e centralidades, contar pares únicos cod_mun_origem x cod_mun_destino
-        pares_comerciais = comerciais.select(['cod_mun_origem', 'cod_mun_destino']).unique().height
-        pares_executivos = executivos.select(['cod_mun_origem', 'cod_mun_destino']).unique().height if executivos.height > 0 else 0
+        if pagina_atual == "centralidades":
+            _pwd = get_files_password()
+            c, e = centralidades_contar_pares_sql(_pwd)
+            pares_comerciais = c
+            pares_executivos = e
+        else:
+            pares_comerciais = comerciais.select(['cod_mun_origem', 'cod_mun_destino']).unique().height
+            pares_executivos = executivos.select(['cod_mun_origem', 'cod_mun_destino']).unique().height if executivos.height > 0 else 0
     
     total_pares = pares_comerciais + pares_executivos
     percentual_comercial = (pares_comerciais / total_pares) * 100 if total_pares > 0 else 0

@@ -1,9 +1,6 @@
 [theme]
 base="light"
 
-[logger]
-level="debug"
-
 [runner]
 fastReruns = true
 enforceSerializableSessionState = false
