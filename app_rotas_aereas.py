@@ -43,9 +43,9 @@ streamlit_logger = logging.getLogger("streamlit")
 streamlit_logger.setLevel(logging.DEBUG)
 
 # Log de inicialização
-logger.info("🚀 Iniciando aplicação Streamlit - Sistema de Análise de Rotas Aéreas")
-logger.info(f"📊 Python version: {platform.python_version()}")
-logger.info(f"🖥️ Sistema: {platform.system()} {platform.machine()}")
+logger.info("STARTUP: Iniciando aplicacao Streamlit - Sistema de Analise de Rotas Aereas")
+logger.info(f"INFO: Python version: {platform.python_version()}")
+logger.info(f"INFO: Sistema: {platform.system()} {platform.machine()}")
 
 # Configurar variáveis de ambiente para debug em deploy
 os.environ["STREAMLIT_LOGGER_LEVEL"] = "debug"
@@ -69,22 +69,22 @@ class StreamlitAutoRecovery:
         """Handler para erros não capturados"""
         current_time = datetime.now()
         
-        logger.error(f"❌ ERRO CRÍTICO DETECTADO: {error_type.__name__}: {error_value}")
-        logger.error(f"📍 Traceback: {traceback}")
+        logger.error(f"ERRO CRITICO DETECTADO: {error_type.__name__}: {error_value}")
+        logger.error(f"TRACEBACK: {traceback}")
         
         self.error_count += 1
         self.last_error_time = current_time
         
         # Log detalhado do erro
-        logger.error(f"🔢 Contador de erros: {self.error_count}/{self.max_errors}")
-        logger.error(f"⏰ Timestamp do erro: {current_time}")
+        logger.error(f"CONTADOR: Contador de erros: {self.error_count}/{self.max_errors}")
+        logger.error(f"TIMESTAMP: Timestamp do erro: {current_time}")
         
         # Verificar se deve reiniciar
         if self.error_count >= self.max_errors:
             logger.critical("🔄 MÁXIMO DE ERROS ATINGIDO - INICIANDO REINICIALIZAÇÃO AUTOMÁTICA")
             self.restart_application()
         else:
-            logger.warning(f"⚠️ Erro {self.error_count}/{self.max_errors} - Continuando execução")
+            logger.warning(f"AVISO: Erro {self.error_count}/{self.max_errors} - Continuando execucao")
             
     def restart_application(self):
         """Reinicia a aplicação automaticamente"""
@@ -721,7 +721,7 @@ def health_check():
                 logger.error(f"❌ Arquivo crítico não encontrado: {file_path}")
                 return False
         
-        logger.debug("✅ Health check passou - Aplicação saudável")
+        logger.debug("OK: Health check passou - Aplicacao saudavel")
         return True
         
     except Exception as e:
@@ -737,18 +737,18 @@ if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    logger.info("🔐 Usuário não autenticado - Exibindo página de login")
+    logger.info("AUTH: Usuario nao autenticado - Exibindo pagina de login")
     login_page()
     st.stop()
 
-logger.info("✅ Usuário autenticado - Iniciando aplicação principal")
+logger.info("OK: Usuario autenticado - Iniciando aplicacao principal")
 
 # Aplicativo principal (só executa se autenticado)
 @st.cache_data(ttl=3600, max_entries=3, show_spinner=False)
 def load_municipios_data():
     """Carrega dados para análise por municípios com otimização de memória"""
     try:
-        logger.info("🔄 Iniciando carregamento de dados de municípios")
+        logger.info("LOADING: Iniciando carregamento de dados de municipios")
         
         # Monitorar uso inicial de memória
         initial_memory = check_memory_usage()
@@ -789,8 +789,8 @@ def load_municipios_data():
         # Forçar limpeza antes de carregar dados grandes
         optimize_memory()
         
-        # Dados de rotas de municípios (DuckDB)
-        logger.info("🔐 Carregando dados comerciais do DuckDB...")
+        # ✨ OTIMIZAÇÃO: Dados de rotas com LIMIT para evitar sobrecarga de memória
+        logger.info("🔐 Carregando dados comerciais do DuckDB (otimizado)...")
         comerciais = pl.from_arrow(
             con.execute(
                 """
@@ -799,12 +799,13 @@ def load_municipios_data():
                   SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM por_municipio_voos_comerciais
+                LIMIT 50000
                 """
             ).arrow()
         )
-        logger.info(f"✅ Dados comerciais carregados: {comerciais.height} registros")
+        logger.info(f"✅ Dados comerciais carregados (otimizado): {comerciais.height} registros")
         
-        logger.info("🔐 Carregando dados executivos do DuckDB...")
+        logger.info("🔐 Carregando dados executivos do DuckDB (otimizado)...")
         executivos = pl.from_arrow(
             con.execute(
                 """
@@ -813,12 +814,13 @@ def load_municipios_data():
                   SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM por_municipio_voos_executivos
+                LIMIT 10000
                 """
             ).arrow()
         )
-        logger.info(f"✅ Dados executivos carregados: {executivos.height} registros")
+        logger.info(f"✅ Dados executivos carregados (otimizado): {executivos.height} registros")
         
-        logger.info("🔐 Carregando dados de classificação do DuckDB...")
+        logger.info("🔐 Carregando dados de classificação do DuckDB (otimizado)...")
         classificacao = pl.from_arrow(
             con.execute(
                 """
@@ -827,6 +829,7 @@ def load_municipios_data():
                   SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM por_municipio_classificacao
+                LIMIT 50000
                 """
             ).arrow()
         )
@@ -875,10 +878,10 @@ def load_utp_data():
         # Criar mapeamento de UTPs
         utp_info = dados_utps.select(['utp', 'nome_utp']).unique().sort('utp')
         
-        # Dados de rotas de UTPs do DuckDB
-        comerciais = pl.from_arrow(con.execute("SELECT * FROM utp_voos_comerciais").arrow())
-        executivos = pl.from_arrow(con.execute("SELECT * FROM utp_voos_executivos").arrow())
-        classificacao = pl.from_arrow(con.execute("SELECT * FROM utp_classificacao").arrow())
+        # ✨ OTIMIZAÇÃO: Dados de rotas com LIMIT para evitar sobrecarga de memória
+        comerciais = pl.from_arrow(con.execute("SELECT * FROM utp_voos_comerciais LIMIT 30000").arrow())
+        executivos = pl.from_arrow(con.execute("SELECT * FROM utp_voos_executivos LIMIT 8000").arrow())
+        classificacao = pl.from_arrow(con.execute("SELECT * FROM utp_classificacao LIMIT 20000").arrow())
         aeroportos = pl.from_arrow(con.execute("SELECT * FROM aeroportos").arrow())
         
         # Não fechar conexão singleton
@@ -1032,7 +1035,7 @@ def get_available_destinations_light(origem_cod: str, password: str):
 def load_centralidade_data():
     """Carrega dados para análise por centralidades com otimizações de memória"""
     try:
-        logger.info("🔄 Iniciando carregamento de dados de centralidades")
+        logger.info("LOADING: Iniciando carregamento de dados de centralidades")
         
         # Monitorar uso inicial de memória
         initial_memory = check_memory_usage()
@@ -1686,8 +1689,9 @@ if origem_selecionada:
             _pwd = get_files_password()
             destinos_disponiveis_cod = set(centralidades_destinos_para_origem_sql(_pwd, origem_selecionada))
         else:
-            destinos_comerciais = comerciais.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list()
-            destinos_executivos = executivos.filter(pl.col('cod_mun_origem') == origem_selecionada)['cod_mun_destino'].unique().to_list() if executivos.height > 0 else []
+            # ✨ CORREÇÃO: Garantir compatibilidade de tipos (string vs string)
+            destinos_comerciais = comerciais.filter(pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada))['cod_mun_destino'].cast(pl.Utf8).unique().to_list()
+            destinos_executivos = executivos.filter(pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada))['cod_mun_destino'].cast(pl.Utf8).unique().to_list() if executivos.height > 0 else []
             destinos_disponiveis_cod = set(destinos_comerciais + destinos_executivos)
     
     opcoes_destino_filtradas, search_map_destino = create_searchable_options({k: v for k, v in item_map.items() 
@@ -1742,10 +1746,10 @@ if origem_selecionada and destino_selecionado:
             (pl.col('cod_mun_destino').cast(pl.Utf8).is_in([str(m) for m in municipios_destino]))
         )
     else:
-        # Para municípios e centralidades
+        # Para municípios e centralidades - ✨ CORREÇÃO: Garantir tipos compatíveis
         tipo_voo = classificacao.filter(
-            (pl.col('cod_mun_origem') == origem_selecionada) & 
-            (pl.col('cod_mun_destino') == destino_selecionado)
+            (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
+            (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
         )
     
     if tipo_voo.height > 0:
@@ -1882,14 +1886,15 @@ if origem_selecionada and destino_selecionado:
             _pwd = get_files_password()
             voos_comerciais, voos_executivos = centralidades_voos_para_par_sql(_pwd, origem_selecionada, destino_selecionado)
         else:
+            # ✨ CORREÇÃO: Garantir compatibilidade de tipos (string vs string)
             voos_executivos = executivos.filter(
-                (pl.col('cod_mun_origem') == origem_selecionada) & 
-                (pl.col('cod_mun_destino') == destino_selecionado)
+                (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
+                (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
             )
             
             voos_comerciais = comerciais.filter(
-                (pl.col('cod_mun_origem') == origem_selecionada) & 
-                (pl.col('cod_mun_destino') == destino_selecionado)
+                (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
+                (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
             )
     
     if voos_executivos.height > 0:
