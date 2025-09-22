@@ -1532,85 +1532,8 @@ else:  # centralidades
             logger.warning(f"AVISO: Erro ao buscar destinos: {str(e)}")
             return []
     
-    @st.cache_data(ttl=600, max_entries=100, show_spinner=False)
-    # Função para voos por par origem-destino - DADOS COMPLETOS
-    def centralidades_voos_para_par_sql(password: str, origem_cod: str, destino_cod: str):
-        con = get_duckdb_connection()
-        try:
-            # Comerciais - DADOS COMPLETOS
-            arrow_c = con.execute(
-                """
-                SELECT 
-                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
-                FROM mun_centralidade_voos_comerciais
-                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
-                  AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-                """,
-                [origem_cod, destino_cod]
-            ).arrow()
-            comerciais_df = pl.from_arrow(arrow_c)
-            
-            # Executivos - DADOS COMPLETOS
-            arrow_e = con.execute(
-                """
-                SELECT 
-                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
-                FROM mun_centralidade_voos_executivos
-                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
-                  AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-                """,
-                [origem_cod, destino_cod]
-            ).arrow()
-            executivos_df = pl.from_arrow(arrow_e)
-            
-            return comerciais_df, executivos_df
-            
-        except Exception as e:
-            logger.error(f"ERRO CRITICO: Erro ao carregar dados de centralidades: {str(e)}")
-            # NUNCA retornar DataFrames vazios - tentar query direta como fallback
-            try:
-                logger.info("FALLBACK: Tentando query direta sem cache...")
-                # Query direta sem cache como último recurso
-                arrow_c = con.execute(
-                    """
-                    SELECT 
-                      SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-                      SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-                      * EXCLUDE (cod_mun_origem, cod_mun_destino)
-                    FROM mun_centralidade_voos_comerciais
-                    WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
-                      AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-                    """,
-                    [origem_cod, destino_cod]
-                ).arrow()
-                comerciais_df = pl.from_arrow(arrow_c)
-                
-                arrow_e = con.execute(
-                    """
-                    SELECT 
-                      SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-                      SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-                      * EXCLUDE (cod_mun_origem, cod_mun_destino)
-                    FROM mun_centralidade_voos_executivos
-                    WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
-                      AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-                    """,
-                    [origem_cod, destino_cod]
-                ).arrow()
-                executivos_df = pl.from_arrow(arrow_e)
-                
-                logger.info(f"FALLBACK SUCESSO: {comerciais_df.height} comerciais, {executivos_df.height} executivos")
-                return comerciais_df, executivos_df
-                
-            except Exception as e2:
-                logger.error(f"FALLBACK FALHOU: {str(e2)}")
-                return pl.DataFrame([]), pl.DataFrame([])
-        finally:
-            con.close()
+    # FUNÇÃO REMOVIDA: centralidades_voos_para_par_sql
+    # Agora usa filtros em memória diretos igual municipios/UTPs
 
     @st.cache_data(ttl=600, max_entries=10, show_spinner=False)
     def centralidades_contar_pares_sql(password: str):
