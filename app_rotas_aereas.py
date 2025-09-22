@@ -1501,7 +1501,7 @@ else:  # centralidades
     item_map = create_centralidade_mappings_fast(dados_municipios)
     mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
     
-    # Consultas SQL sob demanda para origens/destinos e rotas (ultra rápidas)
+    # Consultas em memória para origens/destinos - IGUAL municipios/UTPs
     # Função para origens disponíveis - EM MEMÓRIA
     def centralidades_unique_origins_sql(password: str):
         try:
