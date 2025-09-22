@@ -1502,47 +1502,35 @@ else:  # centralidades
     mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
     
     # Consultas SQL sob demanda para origens/destinos e rotas (ultra rápidas)
-    # Função para origens disponíveis - DADOS COMPLETOS
+    # Função para origens disponíveis - EM MEMÓRIA
     def centralidades_unique_origins_sql(password: str):
-        con = get_duckdb_connection()
         try:
-            arrow = con.execute(
-                """
-                SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod 
-                FROM mun_centralidade_voos_comerciais
-                UNION
-                SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
-                FROM mun_centralidade_voos_executivos
-                ORDER BY cod
-                """
-            ).arrow()
-            return pl.from_arrow(arrow)['cod'].to_list()
-        except Exception:
+            # Usar dados em memória igual municipios/UTPs
+            origens_comerciais = comerciais['cod_mun_origem'].unique().to_list()
+            origens_executivos = executivos['cod_mun_origem'].unique().to_list()
+            origens_unicas = sorted(list(set(origens_comerciais + origens_executivos)))
+            return origens_unicas
+        except Exception as e:
+            logger.warning(f"AVISO: Erro ao buscar origens: {str(e)}")
             return []
-        finally:
-            con.close()
     
-    # Função para destinos disponíveis por origem - DADOS COMPLETOS
+    # Função para destinos disponíveis por origem - EM MEMÓRIA
     def centralidades_destinos_para_origem_sql(password: str, origem_cod: str):
-        con = get_duckdb_connection()
         try:
-            arrow = con.execute(
-                """
-                SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
-                FROM mun_centralidade_voos_comerciais 
-                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
-                UNION
-                SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
-                FROM mun_centralidade_voos_executivos
-                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
-                ORDER BY cod
-                """, [origem_cod, origem_cod]
-            ).arrow()
-            return pl.from_arrow(arrow)['cod'].to_list()
-        except Exception:
+            # Usar dados em memória igual municipios/UTPs
+            destinos_comerciais = comerciais.filter(
+                pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_cod)
+            )['cod_mun_destino'].unique().to_list()
+            
+            destinos_executivos = executivos.filter(
+                pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_cod)
+            )['cod_mun_destino'].unique().to_list()
+            
+            destinos_unicos = sorted(list(set(destinos_comerciais + destinos_executivos)))
+            return destinos_unicos
+        except Exception as e:
+            logger.warning(f"AVISO: Erro ao buscar destinos: {str(e)}")
             return []
-        finally:
-            con.close()
     
     @st.cache_data(ttl=600, max_entries=100, show_spinner=False)
     # Função para voos por par origem-destino - DADOS COMPLETOS
