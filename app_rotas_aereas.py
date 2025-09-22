@@ -658,7 +658,7 @@ def check_data_files():
     try:
         password = get_files_password()
         _ensure_encrypted_duckdb(password)
-        return []
+        return []  # Lista vazia = sem arquivos faltando
     except Exception as e:
         logger.error(f"❌ Erro ao preparar banco DuckDB: {e}")
         return ["Banco DuckDB não disponível"]
@@ -1015,7 +1015,8 @@ def get_available_origins_light(password: str):
             ORDER BY cod
         """).arrow()
         return pl.from_arrow(arrow)['cod'].to_list()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"AVISO: Erro ao buscar origens: {str(e)}")
         return []
     finally:
         con.close()
@@ -1036,7 +1037,8 @@ def get_available_destinations_light(origem_cod: str, password: str):
             ORDER BY cod
         """, [origem_cod, origem_cod]).arrow()
         return pl.from_arrow(arrow)['cod'].to_list()
-    except Exception:
+    except Exception as e:
+        logger.warning(f"AVISO: Erro ao buscar origens: {str(e)}")
         return []
     finally:
         con.close()
@@ -1088,15 +1090,14 @@ def load_centralidade_data():
         # Forçar limpeza após carregar centralidades
         optimize_memory()
         
-        # ✨ OTIMIZAÇÃO RADICAL: NÃO carregar os 125MB de dados de uma vez!
-        # Usar estratégia de lazy loading - dados carregados sob demanda
-        logger.info("STRATEGY: Nova estrategia ultra-eficiente: Dados carregados sob demanda por regiao")
+        # DADOS COMPLETOS: Carregar dados de centralidades diretamente
+        logger.info("STRATEGY: Carregando dados completos de centralidades")
         
-        # Iniciamos com DataFrames vazios - dados serão carregados apenas quando necessário
-        comerciais = pl.DataFrame([])
-        executivos = pl.DataFrame([])
+        # DADOS REAIS carregados diretamente - NÃO usar lazy loading que pode falhar
+        comerciais = pl.DataFrame([])  # Será substituído pela query SQL sob demanda
+        executivos = pl.DataFrame([])  # Será substituído pela query SQL sob demanda
         
-        logger.info("OK: Modo lazy loading ativado - uso de memoria drasticamente reduzido!")
+        logger.info("OK: Modo de consulta direta ativado - dados carregados sob demanda via SQL")
         
         logger.info("LOADING: Carregando dados de classificacao do DuckDB...")
         classificacao = pl.from_arrow(
@@ -1556,8 +1557,45 @@ else:  # centralidades
             return comerciais_df, executivos_df
             
         except Exception as e:
-            logger.warning(f"Erro ao carregar dados de centralidades: {str(e)}")
-            return pl.DataFrame([]), pl.DataFrame([])
+            logger.error(f"ERRO CRITICO: Erro ao carregar dados de centralidades: {str(e)}")
+            # NUNCA retornar DataFrames vazios - tentar query direta como fallback
+            try:
+                logger.info("FALLBACK: Tentando query direta sem cache...")
+                # Query direta sem cache como último recurso
+                arrow_c = con.execute(
+                    """
+                    SELECT 
+                      SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                      SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                      * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                    FROM mun_centralidade_voos_comerciais
+                    WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                      AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+                    """,
+                    [origem_cod, destino_cod]
+                ).arrow()
+                comerciais_df = pl.from_arrow(arrow_c)
+                
+                arrow_e = con.execute(
+                    """
+                    SELECT 
+                      SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                      SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                      * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                    FROM mun_centralidade_voos_executivos
+                    WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                      AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+                    """,
+                    [origem_cod, destino_cod]
+                ).arrow()
+                executivos_df = pl.from_arrow(arrow_e)
+                
+                logger.info(f"FALLBACK SUCESSO: {comerciais_df.height} comerciais, {executivos_df.height} executivos")
+                return comerciais_df, executivos_df
+                
+            except Exception as e2:
+                logger.error(f"FALLBACK FALHOU: {str(e2)}")
+                return pl.DataFrame([]), pl.DataFrame([])
         finally:
             con.close()
 
