@@ -752,7 +752,7 @@ def load_municipios_data():
         
         # Monitorar uso inicial de memória
         initial_memory = check_memory_usage()
-        logger.debug(f"📊 Memória inicial: {initial_memory:.1f}MB")
+        logger.debug(f"MEMORIA: Inicial: {initial_memory:.1f}MB")
         
         # Garantir banco DuckDB disponível
         missing_files = check_data_files()
@@ -789,8 +789,8 @@ def load_municipios_data():
         # Forçar limpeza antes de carregar dados grandes
         optimize_memory()
         
-        # ✨ OTIMIZAÇÃO: Dados de rotas com LIMIT para evitar sobrecarga de memória
-        logger.info("🔐 Carregando dados comerciais do DuckDB (otimizado)...")
+        # Dados de rotas de municípios (DuckDB) - DADOS COMPLETOS
+        logger.info("LOADING: Carregando dados comerciais do DuckDB...")
         comerciais = pl.from_arrow(
             con.execute(
                 """
@@ -799,13 +799,12 @@ def load_municipios_data():
                   SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM por_municipio_voos_comerciais
-                LIMIT 50000
                 """
             ).arrow()
         )
-        logger.info(f"✅ Dados comerciais carregados (otimizado): {comerciais.height} registros")
+        logger.info(f"OK: Dados comerciais carregados: {comerciais.height} registros")
         
-        logger.info("🔐 Carregando dados executivos do DuckDB (otimizado)...")
+        logger.info("LOADING: Carregando dados executivos do DuckDB...")
         executivos = pl.from_arrow(
             con.execute(
                 """
@@ -814,13 +813,12 @@ def load_municipios_data():
                   SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM por_municipio_voos_executivos
-                LIMIT 10000
                 """
             ).arrow()
         )
-        logger.info(f"✅ Dados executivos carregados (otimizado): {executivos.height} registros")
+        logger.info(f"OK: Dados executivos carregados: {executivos.height} registros")
         
-        logger.info("🔐 Carregando dados de classificação do DuckDB (otimizado)...")
+        logger.info("LOADING: Carregando dados de classificacao do DuckDB...")
         classificacao = pl.from_arrow(
             con.execute(
                 """
@@ -829,17 +827,16 @@ def load_municipios_data():
                   SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
                   * EXCLUDE (cod_mun_origem, cod_mun_destino)
                 FROM por_municipio_classificacao
-                LIMIT 50000
                 """
             ).arrow()
         )
-        logger.info(f"✅ Dados de classificação carregados: {classificacao.height} registros")
+        logger.info(f"OK: Dados de classificacao carregados: {classificacao.height} registros")
         
-        logger.info("🔐 Carregando dados de aeroportos do DuckDB...")
+        logger.info("LOADING: Carregando dados de aeroportos do DuckDB...")
         aeroportos = pl.from_arrow(
             con.execute("SELECT * FROM aeroportos").arrow()
         )
-        logger.info(f"✅ Dados de aeroportos carregados: {aeroportos.height} registros")
+        logger.info(f"OK: Dados de aeroportos carregados: {aeroportos.height} registros")
         
         # Não fechar conexão singleton
         
@@ -847,8 +844,8 @@ def load_municipios_data():
         final_memory = check_memory_usage()
         memory_used = final_memory - initial_memory
         
-        logger.info(f"📊 Carregamento concluído - Memória utilizada: {memory_used:.1f}MB")
-        logger.info("✅ Todos os dados de municípios carregados com sucesso")
+        logger.info(f"MEMORIA: Carregamento concluido - Memoria utilizada: {memory_used:.1f}MB")
+        logger.info("OK: Todos os dados de municipios carregados com sucesso")
         
         return dados_municipios, comerciais, executivos, classificacao, aeroportos
         
@@ -878,10 +875,10 @@ def load_utp_data():
         # Criar mapeamento de UTPs
         utp_info = dados_utps.select(['utp', 'nome_utp']).unique().sort('utp')
         
-        # ✨ OTIMIZAÇÃO: Dados de rotas com LIMIT para evitar sobrecarga de memória
-        comerciais = pl.from_arrow(con.execute("SELECT * FROM utp_voos_comerciais LIMIT 30000").arrow())
-        executivos = pl.from_arrow(con.execute("SELECT * FROM utp_voos_executivos LIMIT 8000").arrow())
-        classificacao = pl.from_arrow(con.execute("SELECT * FROM utp_classificacao LIMIT 20000").arrow())
+        # Dados de rotas de UTPs do DuckDB - DADOS COMPLETOS
+        comerciais = pl.from_arrow(con.execute("SELECT * FROM utp_voos_comerciais").arrow())
+        executivos = pl.from_arrow(con.execute("SELECT * FROM utp_voos_executivos").arrow())
+        classificacao = pl.from_arrow(con.execute("SELECT * FROM utp_classificacao").arrow())
         aeroportos = pl.from_arrow(con.execute("SELECT * FROM aeroportos").arrow())
         
         # Não fechar conexão singleton
@@ -1039,7 +1036,7 @@ def load_centralidade_data():
         
         # Monitorar uso inicial de memória
         initial_memory = check_memory_usage()
-        logger.debug(f"📊 Memória inicial: {initial_memory:.1f}MB")
+        logger.debug(f"MEMORIA: Inicial: {initial_memory:.1f}MB")
         
         # Garantir banco DuckDB disponível
         missing_files = check_data_files()
@@ -1081,15 +1078,15 @@ def load_centralidade_data():
         
         # ✨ OTIMIZAÇÃO RADICAL: NÃO carregar os 125MB de dados de uma vez!
         # Usar estratégia de lazy loading - dados carregados sob demanda
-        logger.info("🧠 NOVA ESTRATÉGIA ULTRA-EFICIENTE: Dados carregados sob demanda por região")
+        logger.info("STRATEGY: Nova estrategia ultra-eficiente: Dados carregados sob demanda por regiao")
         
         # Iniciamos com DataFrames vazios - dados serão carregados apenas quando necessário
         comerciais = pl.DataFrame([])
         executivos = pl.DataFrame([])
         
-        logger.info("✅ Modo lazy loading ativado - uso de memória drasticamente reduzido!")
+        logger.info("OK: Modo lazy loading ativado - uso de memoria drasticamente reduzido!")
         
-        logger.info("🔐 Carregando dados de classificação do DuckDB...")
+        logger.info("LOADING: Carregando dados de classificacao do DuckDB...")
         classificacao = pl.from_arrow(
             con.execute(
                 """
@@ -1101,20 +1098,20 @@ def load_centralidade_data():
                 """
             ).arrow()
         )
-        logger.info(f"✅ Dados de classificação carregados: {classificacao.height} registros")
+        logger.info(f"OK: Dados de classificacao carregados: {classificacao.height} registros")
         
-        logger.info("🔐 Carregando dados de aeroportos do DuckDB...")
+        logger.info("LOADING: Carregando dados de aeroportos do DuckDB...")
         aeroportos = pl.from_arrow(con.execute("SELECT * FROM aeroportos").arrow())
         
         con.close()
-        logger.info(f"✅ Dados de aeroportos carregados: {aeroportos.height} registros")
+        logger.info(f"OK: Dados de aeroportos carregados: {aeroportos.height} registros")
         
         # Verificar uso final de memória
         final_memory = check_memory_usage()
         memory_used = final_memory - initial_memory
         
-        logger.info(f"📊 Carregamento de centralidades concluído - Memória utilizada: {memory_used:.1f}MB")
-        logger.info("✅ Todos os dados de centralidades carregados com sucesso")
+        logger.info(f"MEMORIA: Carregamento de centralidades concluido - Memoria utilizada: {memory_used:.1f}MB")
+        logger.info("OK: Todos os dados de centralidades carregados com sucesso")
         
         return dados_municipios, dados_centralidades, comerciais, executivos, classificacao, aeroportos
         
@@ -1471,7 +1468,7 @@ else:  # centralidades
     mun_coords_cache, aero_coords_cache = create_coordinate_maps(dados_municipios, aeroportos)
     
     # Consultas SQL sob demanda para origens/destinos e rotas (ultra rápidas)
-    # ✨ FUNÇÃO RESTAURADA - com performance otimizada usando índices
+    # Função para origens disponíveis - DADOS COMPLETOS
     def centralidades_unique_origins_sql(password: str):
         con = get_duckdb_connection()
         try:
@@ -1483,7 +1480,6 @@ else:  # centralidades
                 SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
                 FROM mun_centralidade_voos_executivos
                 ORDER BY cod
-                LIMIT 2000
                 """
             ).arrow()
             return pl.from_arrow(arrow)['cod'].to_list()
@@ -1492,7 +1488,7 @@ else:  # centralidades
         finally:
             con.close()
     
-    # ✨ FUNÇÃO RESTAURADA - com performance otimizada usando índices 
+    # Função para destinos disponíveis por origem - DADOS COMPLETOS
     def centralidades_destinos_para_origem_sql(password: str, origem_cod: str):
         con = get_duckdb_connection()
         try:
@@ -1506,7 +1502,6 @@ else:  # centralidades
                 FROM mun_centralidade_voos_executivos
                 WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
                 ORDER BY cod
-                LIMIT 1000
                 """, [origem_cod, origem_cod]
             ).arrow()
             return pl.from_arrow(arrow)['cod'].to_list()
@@ -1516,11 +1511,11 @@ else:  # centralidades
             con.close()
     
     @st.cache_data(ttl=600, max_entries=100, show_spinner=False)
-    # ✨ FUNÇÃO ULTRA-OTIMIZADA - Funcionalidade restaurada com limites de segurança
+    # Função para voos por par origem-destino - DADOS COMPLETOS
     def centralidades_voos_para_par_sql(password: str, origem_cod: str, destino_cod: str):
         con = get_duckdb_connection()
         try:
-            # Comerciais - com LIMIT de segurança para evitar crash
+            # Comerciais - DADOS COMPLETOS
             arrow_c = con.execute(
                 """
                 SELECT 
@@ -1530,13 +1525,12 @@ else:  # centralidades
                 FROM mun_centralidade_voos_comerciais
                 WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
                   AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-                LIMIT 5000
                 """,
                 [origem_cod, destino_cod]
             ).arrow()
             comerciais_df = pl.from_arrow(arrow_c)
             
-            # Executivos - com LIMIT de segurança
+            # Executivos - DADOS COMPLETOS
             arrow_e = con.execute(
                 """
                 SELECT 
@@ -1546,7 +1540,6 @@ else:  # centralidades
                 FROM mun_centralidade_voos_executivos
                 WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
                   AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-                LIMIT 5000
                 """,
                 [origem_cod, destino_cod]
             ).arrow()
