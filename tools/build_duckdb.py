@@ -118,6 +118,11 @@ def _create_duckdb_and_import_all_data(temp_db_path: str) -> None:
         if os.path.exists(csv_centralidades):
             con.execute("DROP TABLE IF EXISTS centralidades")
             con.execute("CREATE TABLE centralidades AS SELECT * FROM read_csv_auto(?, header=true)", [csv_centralidades])
+            
+            # Criar índices para otimização de consultas por UF e município
+            con.execute("CREATE INDEX IF NOT EXISTS idx_centralidades_uf ON centralidades(uf)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_centralidades_municipio ON centralidades(municipio)")
+            con.execute("CREATE INDEX IF NOT EXISTS idx_centralidades_utp ON centralidades(utp)")
 
         # Parquet aeroportos
         pq_aeroportos = os.path.join(dados_base, 'Entrada', 'aeroportos.parquet')
@@ -159,6 +164,51 @@ def _create_duckdb_and_import_all_data(temp_db_path: str) -> None:
                 if os.path.exists(caminho):
                     con.execute(f"DROP TABLE IF EXISTS {tabela}")
                     con.execute(f"CREATE TABLE {tabela} AS SELECT * FROM read_parquet(?)", [caminho])
+                    
+                    # Adicionar índices para otimização de consultas - especialmente importante para as tabelas grandes
+                    if 'mun_centralidade' in tabela:
+                        # Para as tabelas de centralidade que são as mais pesadas (125MB)
+                        con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_origem ON {tabela}(cod_mun_origem)")
+                        con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_destino ON {tabela}(cod_mun_destino)")
+                        con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_par ON {tabela}(cod_mun_origem, cod_mun_destino)")
+                        
+                        # Criar views materializadas particionadas por região para reduzir drasticamente uso de memória
+                        regioes = {
+                            'norte': ['AC', 'AP', 'AM', 'PA', 'RO', 'RR', 'TO'],
+                            'nordeste': ['AL', 'BA', 'CE', 'MA', 'PB', 'PE', 'PI', 'RN', 'SE'],
+                            'centro_oeste': ['DF', 'GO', 'MS', 'MT'],
+                            'sudeste': ['ES', 'MG', 'RJ', 'SP'],
+                            'sul': ['PR', 'RS', 'SC']
+                        }
+                        
+                        for regiao, ufs in regioes.items():
+                            ufs_str = "', '".join(ufs)
+                            con.execute(f"""
+                                CREATE VIEW IF NOT EXISTS {tabela}_{regiao} AS 
+                                SELECT v.* FROM {tabela} v
+                                INNER JOIN centralidades c_orig ON v.cod_mun_origem = c_orig.municipio
+                                INNER JOIN centralidades c_dest ON v.cod_mun_destino = c_dest.municipio
+                                WHERE c_orig.uf IN ('{ufs_str}') OR c_dest.uf IN ('{ufs_str}')
+                            """)
+                    
+                    elif 'por_municipio' in tabela:
+                        # Para as tabelas municipais também
+                        con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_origem ON {tabela}(cod_mun_origem)")
+                        con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_destino ON {tabela}(cod_mun_destino)")
+                        con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_par ON {tabela}(cod_mun_origem, cod_mun_destino)")
+                    
+                    elif 'utp' in tabela:
+                        # Para as tabelas UTP - verificar se é tabela de voos ou classificação
+                        if 'classificacao' in tabela:
+                            # Tabela de classificação UTP usa nomes diferentes
+                            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_origem ON {tabela}(mun_origem)")
+                            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_destino ON {tabela}(mun_destino)")
+                            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_par ON {tabela}(mun_origem, mun_destino)")
+                        else:
+                            # Tabelas de voos UTP
+                            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_origem ON {tabela}(UTP_origem)")
+                            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_destino ON {tabela}(UTP_destino)")
+                            con.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabela}_par ON {tabela}(UTP_origem, UTP_destino)")
 
         con.commit()
     finally:
