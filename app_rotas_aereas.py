@@ -1090,14 +1090,39 @@ def load_centralidade_data():
         # Forçar limpeza após carregar centralidades
         optimize_memory()
         
-        # DADOS COMPLETOS: Carregar dados de centralidades diretamente
-        logger.info("STRATEGY: Carregando dados completos de centralidades")
+        # DADOS COMPLETOS: Carregar dados de centralidades igual municipios/UTPs
+        logger.info("STRATEGY: Carregando dados completos de centralidades (igual municipios/UTPs)")
         
-        # DADOS REAIS carregados diretamente - NÃO usar lazy loading que pode falhar
-        comerciais = pl.DataFrame([])  # Será substituído pela query SQL sob demanda
-        executivos = pl.DataFrame([])  # Será substituído pela query SQL sob demanda
+        # DADOS REAIS carregados COMPLETAMENTE - igual municipios e UTPs para garantir funcionamento
+        logger.info("LOADING: Carregando dados comerciais completos...")
+        comerciais = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_comerciais
+                """
+            ).arrow()
+        )
+        logger.info(f"OK: Dados comerciais carregados: {comerciais.height} registros")
         
-        logger.info("OK: Modo de consulta direta ativado - dados carregados sob demanda via SQL")
+        logger.info("LOADING: Carregando dados executivos completos...")
+        executivos = pl.from_arrow(
+            con.execute(
+                """
+                SELECT 
+                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
+                FROM mun_centralidade_voos_executivos
+                """
+            ).arrow()
+        )
+        logger.info(f"OK: Dados executivos carregados: {executivos.height} registros")
+        
+        logger.info("OK: Dados completos carregados - IGUAL municipios/UTPs")
         
         logger.info("LOADING: Carregando dados de classificacao do DuckDB...")
         classificacao = pl.from_arrow(
@@ -1920,10 +1945,17 @@ if origem_selecionada and destino_selecionado:
             (pl.col('UTP_destino') == int(destino_selecionado))
         )
     else:
-        # Para municípios e centralidades
+        # Para municípios e centralidades - USAR MESMA ABORDAGEM
         if pagina_atual == "centralidades":
-            _pwd = get_files_password()
-            voos_comerciais, voos_executivos = centralidades_voos_para_par_sql(_pwd, origem_selecionada, destino_selecionado)
+            # ✨ CORREÇÃO: Usar filtros em memória igual municipios (não SQL dinâmico)
+            voos_comerciais = comerciais.filter(
+                (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
+                (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
+            )
+            voos_executivos = executivos.filter(
+                (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
+                (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
+            )
         else:
             # ✨ CORREÇÃO: Garantir compatibilidade de tipos (string vs string)
             voos_executivos = executivos.filter(
