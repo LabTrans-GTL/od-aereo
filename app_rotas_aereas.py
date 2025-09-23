@@ -619,7 +619,8 @@ def _db_state():
     # Desbloqueia apenas uma vez no ciclo de vida do app
     pwd = get_files_password()
     tmp_db_path = _decrypt_db_to_temp(pwd)
-    con = duckdb.connect(tmp_db_path, read_only=False)
+    # Otimização: Conectar em modo somente leitura para maior segurança e performance no deploy
+    con = duckdb.connect(tmp_db_path, read_only=True)
     return {'path': tmp_db_path, 'con': con}
 
 def get_duckdb_connection():
@@ -631,7 +632,8 @@ def get_duckdb_connection():
         return con
     except Exception:
         # Reabrir usando o arquivo temporário já descriptografado
-        new_con = duckdb.connect(state['path'], read_only=False)
+        # Otimização: Conectar em modo somente leitura
+        new_con = duckdb.connect(state['path'], read_only=True)
         state['con'] = new_con
         return new_con
 
@@ -1167,36 +1169,35 @@ def create_coordinate_maps(dados_municipios, aeroportos):
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
 def get_voos_for_pair_centralidades(origem_cod: str, destino_cod: str):
     """Busca dados de voos para um par origem-destino específico na análise de centralidades."""
-    try:
-        con = get_duckdb_connection()
-        logger.debug(f"QUERY: Buscando voos de centralidade para {origem_cod} -> {destino_cod}")
+    # Essa função agora pode lançar uma exceção em caso de erro de consulta.
+    con = get_duckdb_connection()
+    logger.debug(f"QUERY: Buscando voos de centralidade para {origem_cod} -> {destino_cod}")
 
-        # Voos Comerciais
-        query_com = """
-            SELECT
-              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-              * EXCLUDE (cod_mun_origem, cod_mun_destino)
-            FROM mun_centralidade_voos_comerciais
-            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-        """
-        comerciais_df = pl.from_arrow(con.execute(query_com, [origem_cod, destino_cod]).arrow())
+    # Voos Comerciais
+    # Otimização: A conversão (CAST) foi movida para o lado do parâmetro para permitir
+    # que o DuckDB utilize melhor seus mecanismos internos, em vez de escanear a tabela inteira.
+    query_com = """
+        SELECT
+          SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+          SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+          * EXCLUDE (cod_mun_origem, cod_mun_destino)
+        FROM mun_centralidade_voos_comerciais
+        WHERE cod_mun_origem = CAST(? AS BIGINT) AND cod_mun_destino = CAST(? AS BIGINT)
+    """
+    comerciais_df = pl.from_arrow(con.execute(query_com, [origem_cod, destino_cod]).arrow())
 
-        # Voos Executivos
-        query_exe = """
-            SELECT
-              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-              * EXCLUDE (cod_mun_origem, cod_mun_destino)
-            FROM mun_centralidade_voos_executivos
-            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
-        """
-        executivos_df = pl.from_arrow(con.execute(query_exe, [origem_cod, destino_cod]).arrow())
+    # Voos Executivos
+    query_exe = """
+        SELECT
+          SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+          SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+          * EXCLUDE (cod_mun_origem, cod_mun_destino)
+        FROM mun_centralidade_voos_executivos
+        WHERE cod_mun_origem = CAST(? AS BIGINT) AND cod_mun_destino = CAST(? AS BIGINT)
+    """
+    executivos_df = pl.from_arrow(con.execute(query_exe, [origem_cod, destino_cod]).arrow())
 
-        return comerciais_df, executivos_df
-    except Exception as e:
-        logger.error(f"ERRO: Falha ao buscar voos para par {origem_cod}-{destino_cod}: {e}")
-        return pl.DataFrame(), pl.DataFrame()
+    return comerciais_df, executivos_df
 
 # Funções auxiliares
 def get_mun_coord(cod_municipio, mun_coords_cache):
