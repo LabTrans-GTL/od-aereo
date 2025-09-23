@@ -1169,35 +1169,39 @@ def create_coordinate_maps(dados_municipios, aeroportos):
 @st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
 def get_voos_for_pair_centralidades(origem_cod: str, destino_cod: str):
     """Busca dados de voos para um par origem-destino específico na análise de centralidades."""
-    # Essa função agora pode lançar uma exceção em caso de erro de consulta.
-    con = get_duckdb_connection()
-    logger.debug(f"QUERY: Buscando voos de centralidade para {origem_cod} -> {destino_cod}")
+    try:
+        con = get_duckdb_connection()
+        logger.debug(f"QUERY: Buscando voos de centralidade para {origem_cod} -> {destino_cod}")
 
-    # Voos Comerciais
-    # Otimização: A conversão (CAST) foi movida para o lado do parâmetro para permitir
-    # que o DuckDB utilize melhor seus mecanismos internos, em vez de escanear a tabela inteira.
-    query_com = """
-        SELECT
-          SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-          SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-          * EXCLUDE (cod_mun_origem, cod_mun_destino)
-        FROM mun_centralidade_voos_comerciais
-        WHERE cod_mun_origem = CAST(? AS BIGINT) AND cod_mun_destino = CAST(? AS BIGINT)
-    """
-    comerciais_df = pl.from_arrow(con.execute(query_com, [origem_cod, destino_cod]).arrow())
+        # Correção: Revertendo para a lógica de filtragem original que usa SUBSTR para
+        # compatibilidade com códigos de 6 e 7 dígitos. A otimização anterior
+        # introduziu um erro lógico que impedia a correspondência de códigos.
+        query_com = """
+            SELECT
+              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+              * EXCLUDE (cod_mun_origem, cod_mun_destino)
+            FROM mun_centralidade_voos_comerciais
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+        """
+        comerciais_df = pl.from_arrow(con.execute(query_com, [origem_cod, destino_cod]).arrow())
 
-    # Voos Executivos
-    query_exe = """
-        SELECT
-          SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-          SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-          * EXCLUDE (cod_mun_origem, cod_mun_destino)
-        FROM mun_centralidade_voos_executivos
-        WHERE cod_mun_origem = CAST(? AS BIGINT) AND cod_mun_destino = CAST(? AS BIGINT)
-    """
-    executivos_df = pl.from_arrow(con.execute(query_exe, [origem_cod, destino_cod]).arrow())
+        query_exe = """
+            SELECT
+              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+              * EXCLUDE (cod_mun_origem, cod_mun_destino)
+            FROM mun_centralidade_voos_executivos
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+        """
+        executivos_df = pl.from_arrow(con.execute(query_exe, [origem_cod, destino_cod]).arrow())
 
-    return comerciais_df, executivos_df
+        return comerciais_df, executivos_df
+    except Exception as e:
+        # Erro de robustez: Se a consulta falhar por qualquer motivo (incluindo o erro do PyArrow),
+        # logamos o erro e retornamos dataframes vazios para evitar que a aplicação quebre.
+        logger.error(f"ERRO CRÍTICO ao buscar voos para o par {origem_cod}-{destino_cod}: {e}")
+        return pl.DataFrame(), pl.DataFrame()
 
 # Funções auxiliares
 def get_mun_coord(cod_municipio, mun_coords_cache):
