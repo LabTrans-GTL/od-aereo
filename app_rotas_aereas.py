@@ -998,7 +998,7 @@ def load_voos_by_region_smart(origem_cod: str, destino_cod: str, password: str, 
             logger.error(f"ERRO CRITICO: Fallback também falhou: {str(e2)}")
             return pl.DataFrame([])
     finally:
-        con.close()
+        pass # Não fechar conexão singleton
 
 @st.cache_data(ttl=3600, max_entries=5, show_spinner=False)  
 def get_available_origins_light(password: str):
@@ -1019,7 +1019,7 @@ def get_available_origins_light(password: str):
         logger.warning(f"AVISO: Erro ao buscar origens: {str(e)}")
         return []
     finally:
-        con.close()
+        pass # Não fechar conexão singleton
 
 @st.cache_data(ttl=1800, max_entries=20, show_spinner=False)
 def get_available_destinations_light(origem_cod: str, password: str):
@@ -1041,7 +1041,7 @@ def get_available_destinations_light(origem_cod: str, password: str):
         logger.warning(f"AVISO: Erro ao buscar origens: {str(e)}")
         return []
     finally:
-        con.close()
+        pass # Não fechar conexão singleton
 
 def load_centralidade_data():
     """Carrega dados para análise por centralidades com otimizações de memória"""
@@ -1093,36 +1093,11 @@ def load_centralidade_data():
         # DADOS COMPLETOS: Carregar dados de centralidades igual municipios/UTPs
         logger.info("STRATEGY: Carregando dados completos de centralidades (igual municipios/UTPs)")
         
-        # DADOS REAIS carregados COMPLETAMENTE - igual municipios e UTPs para garantir funcionamento
-        logger.info("LOADING: Carregando dados comerciais completos...")
-        comerciais = pl.from_arrow(
-            con.execute(
-                """
-                SELECT 
-                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
-                FROM mun_centralidade_voos_comerciais
-                """
-            ).arrow()
-        )
-        logger.info(f"OK: Dados comerciais carregados: {comerciais.height} registros")
-        
-        logger.info("LOADING: Carregando dados executivos completos...")
-        executivos = pl.from_arrow(
-            con.execute(
-                """
-                SELECT 
-                  SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
-                  SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
-                  * EXCLUDE (cod_mun_origem, cod_mun_destino)
-                FROM mun_centralidade_voos_executivos
-                """
-            ).arrow()
-        )
-        logger.info(f"OK: Dados executivos carregados: {executivos.height} registros")
-        
-        logger.info("OK: Dados completos carregados - IGUAL municipios/UTPs")
+        # Otimização: Dataframes de voos de centralidades serão carregados sob demanda.
+        logger.info("STRATEGY: Dataframes de voos de centralidades serão carregados sob demanda.")
+        comerciais = pl.DataFrame()
+        executivos = pl.DataFrame()
+        logger.info("OK: Dataframes de voos de centralidades inicializados vazios.")
         
         logger.info("LOADING: Carregando dados de classificacao do DuckDB...")
         classificacao = pl.from_arrow(
@@ -1141,7 +1116,8 @@ def load_centralidade_data():
         logger.info("LOADING: Carregando dados de aeroportos do DuckDB...")
         aeroportos = pl.from_arrow(con.execute("SELECT * FROM aeroportos").arrow())
         
-        con.close()
+        # Otimização: Não fechar a conexão singleton gerenciada pelo cache do Streamlit
+        # con.close() 
         logger.info(f"OK: Dados de aeroportos carregados: {aeroportos.height} registros")
         
         # Verificar uso final de memória
@@ -1187,6 +1163,40 @@ def create_coordinate_maps(dados_municipios, aeroportos):
         aero_coords[row['icao']] = (row['latitude'], row['longitude'])
     
     return mun_coords, aero_coords
+
+@st.cache_data(ttl=1800, max_entries=50, show_spinner=False)
+def get_voos_for_pair_centralidades(origem_cod: str, destino_cod: str):
+    """Busca dados de voos para um par origem-destino específico na análise de centralidades."""
+    try:
+        con = get_duckdb_connection()
+        logger.debug(f"QUERY: Buscando voos de centralidade para {origem_cod} -> {destino_cod}")
+
+        # Voos Comerciais
+        query_com = """
+            SELECT
+              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+              * EXCLUDE (cod_mun_origem, cod_mun_destino)
+            FROM mun_centralidade_voos_comerciais
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+        """
+        comerciais_df = pl.from_arrow(con.execute(query_com, [origem_cod, destino_cod]).arrow())
+
+        # Voos Executivos
+        query_exe = """
+            SELECT
+              SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod_mun_origem,
+              SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod_mun_destino,
+              * EXCLUDE (cod_mun_origem, cod_mun_destino)
+            FROM mun_centralidade_voos_executivos
+            WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
+        """
+        executivos_df = pl.from_arrow(con.execute(query_exe, [origem_cod, destino_cod]).arrow())
+
+        return comerciais_df, executivos_df
+    except Exception as e:
+        logger.error(f"ERRO: Falha ao buscar voos para par {origem_cod}-{destino_cod}: {e}")
+        return pl.DataFrame(), pl.DataFrame()
 
 # Funções auxiliares
 def get_mun_coord(cod_municipio, mun_coords_cache):
@@ -1505,11 +1515,18 @@ else:  # centralidades
     # Função para origens disponíveis - EM MEMÓRIA
     def centralidades_unique_origins_sql(password: str):
         try:
-            # Usar dados em memória igual municipios/UTPs
-            origens_comerciais = comerciais['cod_mun_origem'].unique().to_list()
-            origens_executivos = executivos['cod_mun_origem'].unique().to_list()
-            origens_unicas = sorted(list(set(origens_comerciais + origens_executivos)))
-            return origens_unicas
+            # Otimização: Buscar origens diretamente do banco de dados para economizar memória
+            logger.debug("QUERY: Buscando origens únicas de centralidades do DuckDB")
+            con = get_duckdb_connection()
+            arrow = con.execute("""
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod 
+                FROM mun_centralidade_voos_comerciais
+                UNION
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_executivos
+                ORDER BY cod
+            """).arrow()
+            return pl.from_arrow(arrow)['cod'].to_list()
         except Exception as e:
             logger.warning(f"AVISO: Erro ao buscar origens: {str(e)}")
             return []
@@ -1517,17 +1534,20 @@ else:  # centralidades
     # Função para destinos disponíveis por origem - EM MEMÓRIA
     def centralidades_destinos_para_origem_sql(password: str, origem_cod: str):
         try:
-            # Usar dados em memória igual municipios/UTPs
-            destinos_comerciais = comerciais.filter(
-                pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_cod)
-            )['cod_mun_destino'].unique().to_list()
-            
-            destinos_executivos = executivos.filter(
-                pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_cod)
-            )['cod_mun_destino'].unique().to_list()
-            
-            destinos_unicos = sorted(list(set(destinos_comerciais + destinos_executivos)))
-            return destinos_unicos
+            # Otimização: Buscar destinos diretamente do banco de dados
+            logger.debug(f"QUERY: Buscando destinos de centralidades para a origem {origem_cod} do DuckDB")
+            con = get_duckdb_connection()
+            arrow = con.execute("""
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_comerciais 
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                UNION
+                SELECT DISTINCT SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) AS cod
+                FROM mun_centralidade_voos_executivos
+                WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ?
+                ORDER BY cod
+            """, [origem_cod, origem_cod]).arrow()
+            return pl.from_arrow(arrow)['cod'].to_list()
         except Exception as e:
             logger.warning(f"AVISO: Erro ao buscar destinos: {str(e)}")
             return []
@@ -1858,15 +1878,8 @@ if origem_selecionada and destino_selecionado:
     else:
         # Para municípios e centralidades - USAR MESMA ABORDAGEM
         if pagina_atual == "centralidades":
-            # ✨ CORREÇÃO: Usar filtros em memória igual municipios (não SQL dinâmico)
-            voos_comerciais = comerciais.filter(
-                (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
-                (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
-            )
-            voos_executivos = executivos.filter(
-                (pl.col('cod_mun_origem').cast(pl.Utf8) == str(origem_selecionada)) & 
-                (pl.col('cod_mun_destino').cast(pl.Utf8) == str(destino_selecionado))
-            )
+            # Otimização: Carregar dados sob demanda para o par selecionado
+            voos_comerciais, voos_executivos = get_voos_for_pair_centralidades(origem_selecionada, destino_selecionado)
         else:
             # ✨ CORREÇÃO: Garantir compatibilidade de tipos (string vs string)
             voos_executivos = executivos.filter(

@@ -1,22 +1,2 @@
 [theme]
 base="light"
-
-[runner]
-fastReruns = true
-enforceSerializableSessionState = false
-
-[client]
-showErrorDetails = false
-
-[server]
-headless = true
-enableCORS = false
-enableXsrfProtection = false
-runOnSave = true
-allowRunOnSave = true
-
-[browser]
-gatherUsageStats = false
-
-[global]
-developmentMode = false
