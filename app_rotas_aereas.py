@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 streamlit_logger = logging.getLogger("streamlit")
 streamlit_logger.setLevel(logging.DEBUG)
 
+# Otimização de log: Silenciar logs excessivos do watchdog que causam loop no deploy
+logging.getLogger('watchdog').setLevel(logging.INFO)
+
 # Log de inicialização
 logger.info("STARTUP: Iniciando aplicacao Streamlit - Sistema de Analise de Rotas Aereas")
 logger.info(f"INFO: Python version: {platform.python_version()}")
