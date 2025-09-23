@@ -712,16 +712,8 @@ def health_check():
         memory_usage = check_memory_usage()
         logger.info(f"INFO: Uso de memoria atual: {memory_usage:.1f}MB")
         
-        # Verificar arquivos críticos
-        critical_files = [
-            "Dados/Entrada/mun_UTPs.csv",
-            "Dados/Entrada/centralidades.csv"
-        ]
-        
-        for file_path in critical_files:
-            if not os.path.exists(file_path):
-                logger.error(f"❌ Arquivo crítico não encontrado: {file_path}")
-                return False
+        # Otimização: A verificação de arquivos CSV de entrada não é mais necessária em produção,
+        # pois os dados já estão no banco de dados DuckDB. Removida para evitar logs de erro falsos.
         
         logger.debug("OK: Health check passou - Aplicacao saudavel")
         return True
@@ -1187,7 +1179,9 @@ def get_voos_for_pair_centralidades(origem_cod: str, destino_cod: str):
             FROM mun_centralidade_voos_comerciais
             WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
         """
-        comerciais_df = pl.from_arrow(con.execute(query_com, [origem_cod, destino_cod]).arrow())
+        # Otimização: Usar .pl() para uma conversão direta e mais robusta para DataFrame Polars,
+        # evitando a camada intermediária do Arrow que estava falhando no servidor.
+        comerciais_df = con.execute(query_com, [origem_cod, destino_cod]).pl()
 
         query_exe = """
             SELECT
@@ -1197,7 +1191,7 @@ def get_voos_for_pair_centralidades(origem_cod: str, destino_cod: str):
             FROM mun_centralidade_voos_executivos
             WHERE SUBSTR(CAST(cod_mun_origem AS VARCHAR),1,6) = ? AND SUBSTR(CAST(cod_mun_destino AS VARCHAR),1,6) = ?
         """
-        executivos_df = pl.from_arrow(con.execute(query_exe, [origem_cod, destino_cod]).arrow())
+        executivos_df = con.execute(query_exe, [origem_cod, destino_cod]).pl()
 
         return comerciais_df, executivos_df
     except Exception as e:
